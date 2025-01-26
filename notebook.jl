@@ -5,8 +5,10 @@ using Markdown
 using InteractiveUtils
 
 # ╔═╡ 21b2cbda-17d6-4466-adbc-5e513482e1af
+# Import some packages
 begin
     using PlutoUI
+	using BenchmarkTools
 end
 
 # ╔═╡ 8f6cf27f-5648-40ab-b029-d52c0eaf3883
@@ -17,22 +19,29 @@ md"""
 # Asyncronous programming in Julia
 _Written 2025-12-26_
 
-**Find this notebook at https://github.com/jakobnissen/julia_async**
+**This notebook is hosted at viralinstruction.com**
 
-When I read blogs or textbooks on programming, I'm struck by the variety of use cases and contexts programming is used in, and how that diversity shapes how people think about the craft.
-Many of the blogs I read describe their programming as revolving around websites and networks, where themes like communication protocols and JavaScript frameworks play major roles.
-In my eight years of scientific programming, I've never had to think about any of that stuff. To me, all of that is like a parallel universe of software which interacts very little with what I do on my job, writing scientific software.
+**Find the source code at https://github.com/jakobnissen/julia_async**
 
-Most of the blogs I read mention asyncronous programming in this context of 'network coding', and so I thought that async was mostly about how your program handled waiting for network data.
+When I read blogs or textbooks on programming, I'm struck by the diversity of vantage points from which people think about our craft.
+A lot of blogs describe their programming as revolving around websites and networks, where themes like communication protocols and JavaScript frameworks play major roles.
+In my eight years of scientific programming, I've never had to think about any of that stuff. To me, that's like a parallel universe of software which interacts very little with what I do, or care about, on my job.
+
+Most of the blogs I read mention asyncronous programming in this context of 'websites coding'. So, I thought that async was mostly about how your program handled waiting for network data.
 An important subject, perhaps, but surely something I could ignore as a scientist.
 
 Oh boy was that wrong.
 
 In this notebook, I'll dig into asyncronous programming in Julia.
-It will be about the overall design of async in the language,
-a little about how it works under the hood,
-and the basics of how to get started with using it.
+I will begin with the most fundamental building blocks of async, and build up towards the more human-friendly high level async interfaces.
+
+Let's begin.
 """
+
+# ╔═╡ 0746182a-2e0e-4bc3-a8e5-459b8a7a6f28
+# Make sure any benchmarking cells don't take too long
+# to execute. Two seconds per cell should be enough.
+BenchmarkTools.DEFAULT_PARAMETERS.seconds = 2;
 
 # ╔═╡ b278c476-74e9-4399-a05c-7c15111bfd3c
 TableOfContents()
@@ -40,11 +49,12 @@ TableOfContents()
 # ╔═╡ 17ddbb08-cd8d-446e-b806-dc3000dc2184
 md"""
 ## Why is async important?
-The defining property of asyncronous programming is having different parts of your program running at the same time.
-To do this, the programming language needs to somehow abstract over 'units of computation' as separate 'tasks' that can be started, paused, restarted and stopped.
+Asyncronous programming means having different parts of your program in progress at the same time, although, as we will see, the meaning of "the same time" is elusive.
+
+To do this, the programming language needs to somehow abstract over 'units of computation' as separate _tasks_ that can be started, paused, restarted and stopped.
 
 In Julia, this is fittingly modelled with the `Task` type.
-Tasks are most easily created with the `Threads.@spawn` macro, which will wrap as Julia expression in a zero-argument function, and then run that function as a task:
+Tasks are most easily created with the `Threads.@spawn` macro, which will wrap a Julia expression in a zero-argument function, and then run that function as a task:
 """
 
 # ╔═╡ 2bd97906-edc8-48e8-ac2d-6a87a2e01fe5
@@ -53,17 +63,14 @@ task = @spawn begin
 	return x + 1
 end
 
-# ╔═╡ af3b6b92-d1a1-43de-a88b-605f559e1d68
-task
-
 # ╔═╡ c4f33908-efab-4654-b9dd-b4e46573428a
 md"""
 Tasks are first _created_, then _started_, after which they can be _paused_ and _resumed_ an arbitrary amount of times during their lifetime.
 When the function they wrap returns, the task is _done_.
 If the function in the task throws an unhandled exception, the task has _failed_.
-Finished and done tasks cannot be restarted.
+Failed and done tasks cannot be restarted.
 
-To obtain the return value of a task, use `fetch`. 
+To wait for the completion of a task and obtain its return value, use `fetch`. 
 """
 
 # ╔═╡ 5e45c378-3788-484c-906b-86586c8cd7c8
@@ -71,14 +78,14 @@ fetch(task)
 
 # ╔═╡ a8acd763-7068-4a2c-9dd9-8f926680f8b7
 md"""
-The most common (but not _only_!) use case for tasks is to allow _parallel computation_, where multiple tasks may run on your computer at the same time.
+The most common (but not _only_!) use case for tasks is to allow _parallel computation_, where multiple tasks are running at the same time.
 
 When tasks are started, they run on an underlying _thread_ provided by the operating system.
 The total number of threads currently needs to be set from command line when starting Julia using the command-line flag `-t`.
-It's the job of the operating system to provide hardware resouces (e.g. CPU time)
-for each of the threads.
-A CPU core can only run one thread at a time, so the number of threads are usually a small, fixed number corresponding to the core count of the CPU.
-Laptop CPUs today typically have 8 or more cores, so parallel computation unlocks serious performance compared to using a single thread. 
+It's the job of the operating system to distribute hardware resouces (e.g. CPU time) among the threads.
+
+A CPU core can only run one or two threads at a time, so the number of threads are usually a small, fixed number corresponding to the core count of the CPU.
+Nonetheless, even laptops today usually have 8 or more cores, so parallel computation offers a compute potential too good to pass up.
 
 You can check the number of current threads with the function `Threads.nthreads()`:
 """
@@ -88,17 +95,17 @@ Threads.nthreads()
 
 # ╔═╡ f74b1284-dece-4216-bb06-29514415ff5f
 md"""
-By starting Julia with more than one thread, multiple tasks can run concurrently.
-Julia intentionally provide few abstractions for the threads themselves, because they are supposed to be abstracted away.
-As a programmer, your focus is supposed to be on managing your own Julia code in the form of `Task`, and you can usually simply rely on Julia to do a reasonable job of scheduling all tasks across the available threads in an efficient manner.
+Julia intentionally provide few abstractions to interact with the threads themselves, focusing instead on _tasks_ as the central unit of asyncronous computing.
+As a programmer, your focus is supposed to be on managing the tasks, and you can usually simply rely on Julia to do a reasonable job of running the tasks on all available threads in an efficient manner.
 
-Precisely because the user is not supposed to think about threads, Julia has great freedom in how it maps tasks to threads:
-Your task may be run on any available thread, even moved between different threads while running, and started and stopped at any point (_mostly_ any point, I'll get back to that later).
+Precisely because the user is not supposed to think about threads, Julia has great freedom in which tasks are run on what threads.
+At least abstractly, aA task may be run on any available thread, and even moved between different threads while running, and started and stopped at any point.
 """
 
 # ╔═╡ ef36118e-2fdf-4c99-a9da-f8cbc6885fb3
 md"""
-One of the most basic design patterns for using parallelism is to spawn and fetch tasks within a single function. For example, in the following case: 
+To whet our appetite, let's demonstrate a toy use of tasks to achieve asyncrony.
+One of the most basic design patterns is to spawn and fetch tasks within a single function. For example, in the following case: 
 """
 
 # ╔═╡ 67664ef0-0f00-4388-a47c-9d97d7b443a5
@@ -109,7 +116,7 @@ begin
 	function complex_function(x)
 		t = @spawn simple_function_1(x)
 		a = simple_function_2(x)
-		return (fetch(t)::Float64, a)
+		return (fetch(t)::Int, a)
 	end
 
 	complex_function(9)
@@ -117,11 +124,11 @@ end
 
 # ╔═╡ 0f800d3f-34ae-4f6c-b6bc-d7c82c1c1af2
 md"""
-In `complex_function`, the calls to the two 'simple functions' do not depend on each other, and may be run in any order. Hence, we can run one of them as a separate task, which then runs in the background while the other simple function is executed.
+In `complex_function`, the calls to the two 'simple functions' do not depend on each other, and may be run in any order. Hence, we can run one of them as a separate task, which then runs in the background while the other simple function is executed. In principle, this pattern can double the speed of a function with the same structure as `complex_function`.
 
 At the time of writing, Julia unfortunately cannot do type inference on `fetch` which always infers to `Any`.
 Hopefully, that will be fixed in the near future.
-Until then, you might need to annotate the return value of `fetch` with the expected return type to obtain type stability.
+Until then, I recommend you annotate the return value of `fetch` with the expected return type to obtain type stability.
 
 In round numbers, spawning and fetching a task has a rather large overhead of five microseconds and 16 KiB RAM.
 For this reason, the above pattern is really only useful in relatively high-level function calls.
@@ -129,10 +136,9 @@ For this reason, the above pattern is really only useful in relatively high-leve
 
 # ╔═╡ 20ee5cfa-b80c-4a2f-8314-67048c1c429b
 md"""
-### The law of async
-Since async is all about splitting your program into stoppable and resumable chunks part of your program, making your code asyncronous can be invasive, in that it can have a large impact on the structure of your entire program.
-Async is also (deservedly) infamous for being tricky and prone to bugs.
-
+## The law of async
+Since async is all about splitting your program into stoppable and resumable chunks part of your program, converting syncronous code to being asyncronous can be an invasive exercise, in that it may reorganise your entire program.
+Async code is also (deservedly) infamous for being tricky to reason about and prone to bugs.
 To reduce the risk of bugs, it helps to internalize the cental law of async:
 
 > Mutation requires exclusivity
@@ -141,11 +147,11 @@ That is, if one task mutates some data, no other task must access that data (rea
 The reason is that most code relies on the assumption that data doesn't spontaneously change while it's being operated on.
 If task A mutates some data while task B operates on it, from the point of view of task B, the data _does_ appear to spontaneously mutate.
 
-In this spirit of legalism, let's write some sections to this law:
+In this spirit of legalism, let's write some sections of this law:
 
 § 1a. The different elements of an `Array` are considered different data.
   That is, it's allowed for two tasks to mutate or operate on
-  different elements of the same array.
+  different elements concurrently.
 
 § 1b. Some operations appear to only affect one element of the array, but
   actually affects all of them. E.g. `push!` might cause the whole array
@@ -157,39 +163,466 @@ In this spirit of legalism, let's write some sections to this law:
   which affects multiple elements in the `BitArray`
 
 § 1c. If no task is mutating a piece of data, then it may be shared freely
-      with no worries. For example, multiple tasks may look up in the same
-      dict, or copy the same string, concurrently.
+  among tasks. For example, multiple tasks may look up in the same
+  dict, or copy the same string, concurrently.
 """
 
 # ╔═╡ a279c000-2154-44b9-bb72-41862b61fcbc
 md"""
-## Thread safety: Atomic operations
+## Data races
+
+Let's have a look at an example of what happens when you violate the law of async.
+
+In the code below, `add_ten_million!` will increment an integer through a reference ten million times. The function `increment_occasionally` will read the same reference, add its content to a result, and then zero the integer in the reference.
+You can envision this as modelling a task that makes progress on some computation, and task that occasionally displays the progress.
+
+The code contains a function call to `Threads.atomic_fence`.
+You can ignore this for now - I'll get back to it later.
 """
 
-# ╔═╡ 359fea17-f45f-4705-8f0d-abe7374564c3
-# Example of data race
-# Atomics to solve this
-# What problem does atomics really solve? Dig into the orderings etc (essentially copy that blog post)
-# Atomics can be used to sync tasks, but they are often too low-level to be practically useful. For example, how do you coordinate several tasks from different libraries running on a fixed threadpool? Using atomics, we have better abstractions. To understand how these work, let's take a detour into how async works under the hood.
+# ╔═╡ 0668560d-d2ff-49ae-a5ae-3a92ba269e53
+function add_ten_million!(ref)
+	for i in 1:10_000_000
+		ref[] += 1
+		# I'll explain what this fence does later
+		Threads.atomic_fence()
+	end
+end;
+
+# ╔═╡ a40cd157-fde1-49be-9156-0b8caa12e5a5
+function increment_occasionally(ref)
+	t = time_ns()
+	result = 0
+	while time_ns() - t < 1_000_000_000
+		result += ref[]
+		ref[] = 0
+		Threads.atomic_fence()
+	end
+	result
+end;
+
+# ╔═╡ fc99d8b6-9b32-46a4-bde0-9108b029e43e
+md"""
+Below, I run the two functions in parallel, where they work on the same ref.
+Clearly, when they are done, the result will be ten million... right?
+"""
+
+# ╔═╡ 602c3a65-79c2-4e6b-a70d-c9b3c1df20ca
+let
+	ref = Ref(0)
+	t = @spawn increment_occasionally(ref)
+	add_ten_million!(ref)
+	# Fetch the result and add anything left in `ref`
+	# not yet taken by `increment_occasionally`
+	fetch(t) + ref[]
+end
+
+# ╔═╡ 592fc034-8344-4cb7-b378-6ced7205ad9e
+md"""
+The result is _undeterministic_ - every time you run it, it's likely to give a different number.
+
+The reason it doesn't behave as expected is that both tasks mutate `ref` concurrently, violating the law of async.
+We call such situation _data races_.
+
+In this particular example, the problem occurs because of the details of how the line `ref[] += 1` is implemented.
+The line `ref[] += 1` is equivalent to `ref[] = ref[] + 1` - actually three operations in disguise:
+
+1. Load `ref[]`
+2. Add 1 to the loaded value
+3. Store the result back into `ref[]`.
+
+Suppose now `ref` has a value of 5, and task A runs `add_ten_million` thus incrementing `ref`, and task B runs `increment_occassionally` and thus zeros `ref`.
+There is is some chance that it could be executed in the following order:
+
+1. Task A loads `ref[]` getting 5
+2. Task B computes `result += ref[]`
+3. Task A adds one to the loaded value of 5
+4. Task B zeros `ref`
+5. Task A sets `ref` to 6
+
+If that occurs, `ref` is not zeroed like it's supposed to, and therefore the 5 previous increments will be added twice to `result`.
+
+Here, the underlying cause is that `ref[] += 1` is composed of several steps, and that the other task is able to read or modify data while it is in the middle of this series of steps.
+
+In computer science terms, we say that the problem is that `ref[] += 1` is _not atomic_. Here, "atomic" is used in the original Greek sense, meaning _indivisible_.
+An atomic operation is one that can never be observed is a state of partial completion - it either has not happened yet, or is already complete.
+
+### Even single CPU instructions are not atomic
+It is tempting to try to solve data races like the one above by simply choosing operations which are not implemented in terms of multiple smaller operations.
+But if you look into the generated assembly code for the `add_ten_million!` function above, you will see that the line `ref[] += 1` is compiled to a single instruction - at least on my computer with a x86-64 CPU.
+So naively, one would think that this single instruction would be atomic - not composed of multiple, smaller steps. Nonetheless, the data race happened. Why?
+
+In the CPU, even single CPU instructions may be executed in terms of smaller _micro-operations_, the details of which is an implementation detail of the CPU. Furthermore, the CPU's memory system is complex and multi-layered, and there is no guarantee that when a computer stores a value to memory, other parts of the CPU will immediately be able to see the stored value.
+Finally, on the programming language level, while Julia might implement the increment as a single instruction right now, Julia provides no guarantee that the compiler will generate the same assembly code in the future.
+
+This will be a recurring theme in this notebook: The rules of async are abstractions that can't easily be explained in terms of the underlying implementation, because the implementations are complex and opaque.
+As a programmer, your best bet is to adhere to the abstraction and not try to outsmart it by peeking under the hood. 
+
+Once we know that
+1. All CPU operations may be split into multiple steps in the CPU and the memory hierarchy, and
+2. Interacting with data that is in a partially processed state may cause a data race,
+
+we find ourselves forced to conclude that two different tasks can never interact with the same data at all, and so the prospect of writing ayncronous code appear completely hopeless.
+
+## Atomic operations
+Fortunately, Julia provides dedicated _atomic operations_ to address this problem. The compiler guarantees that these operations are always compiled down to dedicated atomic CPU instructions, which the CPU in turn guarantees are actually atomic.
+
+Let's try to solve the bug using atomic operations.
+To use atomic operations in Julia, we need to use a mutable struct, with the relevant field marked `@atomic`:
+"""
+
+# ╔═╡ a5fa1503-5880-4d0e-aba8-0c3ee34b6dfa
+mutable struct Atomic{T}
+	@atomic x::T
+end
+
+# ╔═╡ 422c8758-e0f6-491e-ad0d-743f4d9e7c48
+md"""
+We can now rewrite the functions above, using this atomic integer in place of our old `Ref`.
+Note that all operations on atomic fields needs to be marked `@atomic`.
+"""
+
+# ╔═╡ 107291d1-1c00-45a7-9225-be541ff44ab6
+function add_ten_million_atomic!(atomic)
+	for i in 1:10_000_000
+		@atomic atomic.x += 1
+	end
+end;
+
+# ╔═╡ 4266d974-0dca-4798-9952-2a7e8c77968c
+function increment_occasionally_atomic(atomic)
+	t = time_ns()
+	result = 0
+	while time_ns() - t < 1_000_000_000
+		# Atomic swap does a load and a store in a single atomic
+		# operation, here it swaps the atomic.x field with 0.
+		result += (@atomicswap atomic.x = 0)
+	end
+	result
+end;
+
+# ╔═╡ 6a1c5924-92b6-40ef-967f-494332ade500
+let
+	atomic = Atomic{Int}(0)
+	t = @spawn increment_occasionally_atomic(atomic)
+	add_ten_million_atomic!(atomic)
+	fetch(t) + @atomic atomic.x
+end
+
+# ╔═╡ 718eac91-b4d1-4dee-ac67-76e4cb8ef341
+md"""
+Voila! The bug disappeared.
+
+## Memory re-ording
+Atomic operations have a _memory ordering_ associated with them.
+To understand memory ordering, it is necessary to take a detour and look at how memory re-ordering happens in normal non-atomic code that is executed within a task.
+
+### Re-ordering within a task
+We begin by looking at the simple Julia function below:
+"""
+
+# ╔═╡ fde5713b-2774-43dc-90d1-36b1446d4540
+function order1()
+	b = 1 + 1
+	a = 1
+	a = 2
+	return a + b
+end;
+
+# ╔═╡ 19609694-3c8e-4b46-be18-63011e315308
+md"""
+As we know and love, the Julia compiler will make sweeping changes the code we've written in the name of optimisation.
+For example, it may evaluate `b = 1 + 1` to `2` at compile time, then move this computation down onto the last line, such that it becomes `return a + 2`.
+Similarly, it may delete the redundant `a = 1` line, since `a` will be overwritten immediately after, anyway.
+
+But wait: If the compiler is allowed to _both_ shuffle around the code, _and_ delete redundant stores, why can't it reorder `a = 2` to come before `a = 1`, and then delete the now-redundant `a = 2` line instead?
+
+The obvious answer is that the compiler must have a notion of _dependent data_: Computing `b` has no dependency on the computation of `a`, and so may be moved around freely with respect to `a`.
+In contrast, `a = 1` and `a = 2` are dependent on each other, since they mutate the same variable.
+Generally, data (i.e. a variable or a memory location) `A` depends on data `B` if `B` is being used to mutate `A`.
+
+Dependent operations must have a notion of _happens before_, i.e. `a = 1` happens before `a = 2`, so these two lines can't just be rearranged with respect to each other.
+
+Once again, I want to stress that _happens before_ is an __abstraction__.
+In practise, the function `order1` will compile down to simply `return 4`, and when the program runs, there won't exist any data that corresponds to the variables `a` or `b`.
+Nonetheless, we can still unambiguously say that `a = 1` happens before `a = 2`.
+
+As we've seen before, if memory is being mutated, it can _only_ be shared between tasks if the mutation is atomic, since sharing non-atomically mutated memory may cause a data race.
+For this reason, barring atomic operations, data in different tasks cannot have a valid data dependency of each other, and as a consequence, only atomic operations can establish a happens-before relationship between two tasks.
+
+### Happens-before relationships between tasks
+Let's look at the happens-before relationships in the code below and consider what that implies for the result
+"""
+
+# ╔═╡ 9fe22bc2-2c4a-423d-85cb-60a16ad68ea3
+function overwrite(a::Ref{Bool}, b::Ref{Bool})
+	a[] = true
+	b[] = a[]
+end;
+
+# ╔═╡ 00e9e859-3238-41f8-93ca-b2243495083b
+function observe_overwrite()
+	a = Ref(false)
+	b = Ref(false)
+	t = @spawn overwrite(a, b)
+	b[] ? a[] : true
+end;
+
+# ╔═╡ b74ae921-f376-4a40-b042-4e7a777902ef
+md"""
+Here, `observe_overwrite()` may return both `false` and `true`.
+
+That may surprise you. After all, `b[] = a[]` is guaranteed to happen after `a[] = true`, since `b` depends on `a`.
+Therefore, you would think, in `observe_overwrite`, if `b[]`, then `a[] = true` must have already happened, and therefore, `a[]` necessarily must return `true`.
+
+Right?
+
+Not so. What we missed with the above analysis is that, absent atomic operations, there is no notion of happens-before between tasks. So, the function `observe_overwrite` could observe the operations in `overwrite` in any order.
+Remarkably, this includes the reality-warping order where `b` stores `true` __before__ `a` does, despite `b` supposedly loading its value from `a`!
+Therefore, `observe_overwrite` could plausibly load `true` from `b[]`, and then return a `false` from `a[]`!
+
+We can construct even more cursed situations where the lack of happens-before between tasks mean that one task will implicitly observe another task doing its operation in an absurd and seemingly impossible order.
+
+We _could_ then explain why this can happen in terms of the complex underlying implementation in the CPU and memory hierarchy, but as I previously said, there's little point in trying to peek behind the curtain. Just use atomics when sharing data between tasks, or else you'll get bugs.
+
+### Atomic memory orderings
+It's important to keep in mind _why_ our compiler, CPU and memory re-order operations, making asyncronous code so damned hard to reason about: Speed.
+Computers could be built perfectly syncronously with no out-of-order execution, but they would run tens, or hundreds of times slower.
+The more we restrict out-of-order computation using atomics, the slower our program runs.
+Ideally, we want to place only the exact amount of re-ordering restrictions to allow our async code to be correct, but no more.
+
+Therefore, atomic operations come with a selection of _memory orderings_, such that we can pick the most lax ordering that allows some optimisations, while still making our program work correctly.
+
+#### Ordering: Sequentially consistent
+The default memory ordering, used if not explicitly specified, is also the strongest one: _sequentially consistent ordering_.
+When one task observes the result of a sequentially consistent operation, it is guaranteed to be able to observe all previous reads and writes of that task, and to not yet be able to see all future reads and writes.
+In this way, it acts like a memory barrier: No operations can be re-ordered across the barrier, either in the before => after direction, nor in the after => before direction, no matter what task you are observing from.
+
+We can fix the above example with a sequentially consistent operation:
+If the observer task atomically reads `b.x` as `true`, the atomic operation `b.x = a[]` is fully completed, in which case `a[] = true` is guaranteed to have been completed due to the memory ordering guarantee of sequentially consistent.
+"""
+
+# ╔═╡ 65fc3a2d-de89-4cc2-8f1e-dbc2f90c416d
+function overwrite_atomic(a::Ref{Bool}, b::Atomic{Bool})
+	a[] = true
+	# Sequentially consistent ordering is default,
+	# so we could have omitted it here.
+	@atomic :sequentially_consistent b.x = a[]
+end;
+
+# ╔═╡ a08bd0d6-776e-46a7-a186-614cc0bbd65d
+function observe_overwrite_atomic()
+	a = Ref(false)
+	b = AtomicBool(false)
+	t = @spawn overwrite(a, b)
+	(@atomic :sequentially_consistent b.x) ? a[] : true
+end;
+
+# ╔═╡ fd87476d-b32b-4785-9fdc-21da66b9adaa
+md"""
+#### Ordering: Monotonic (or relaxed)
+At the opposite end from sequentially consistent ordering, we have the _monotonic_ ordering, also called _relaxed_ ordering in other languages.
+This ordering provide _no restrictions_ on memory re-ordering, allowing the computer full freedom to re-order operations around for maximal performance.
+
+Consider the example in `add_ten_million_atomic!`.
+Here, we don't really care if the compiler moves around the atomic loads or stores, e.g. by unrolling the loop, or even by the compiler moving the atomic increments outside the loop, and switching the ten million atomic increments to a single atomic addition by ten million.
+
+For this reason, that example would have been best solved by using monotonic atomic operations.
+"""
+
+# ╔═╡ 27133bd1-433e-4bc4-ac6e-c06b9c245b6e
+md"""
+#### Ordering: Acquire and release
+It turns out, that, most of the time when we _do_ care about memory ordering, we don't require the kind of complete memory barrier that the sequentially consistent ordering provide.
+
+One of the most common scenarios in async programming is when one task computes value, then atomically modifies some flag to signal the value is ready.
+Meanwhile, another task reads the flag, waiting for it to be changed before the task loads the value and continues processing it.
+
+An example could look like this:
+"""
+
+# ╔═╡ e07e174d-3719-4025-91aa-f56365a68453
+function mark_when_ready(is_ready, shared)
+	sleep(0.2) # do some computation
+	shared[] = 42
+	@atomic :release is_ready.x = true
+end;
+
+# ╔═╡ d11037b5-241d-4878-9602-0043bb21e72b
+function return_when_ready(is_ready, shared)
+	while !(@atomic :acquire is_ready.x)
+		# Only check once ever 10 miliseconds
+		sleep(0.01)
+	end
+	shared[]
+end;
+
+# ╔═╡ 2a383feb-22d8-48d8-b247-c20ec5bbe91b
+md"""
+Here, in `mark_when_ready`, it's crucial that no operations are moved from in the before => after direction across the atomic modification of `is_ready`.
+For example, if `shared[] = 42` was moved to after the atomic operation, then the other task might use `shared` before it was ready.
+
+But the opposite isn't true! It would be no problem if the compiler moved some non-atomic operations in the after => before direction across the atomic operation.
+
+In `return_when_ready`, it's the opposite situation: `shared[]` cannot move in the after => before direction, but it would not be a problem if there was some operation above the atomic load that was moved to after.
+
+These kinds of situations are what the _acquire_ and _release_ orderings are used for: The release ordering is used for a write operation to release some data to another task, and the acquire ordering is used for a read operation to access data modified in another task.
+They each create one-way memory barriers; release creates an after => before barrier, and acquire a before => after barrier.
+"""
+
+# ╔═╡ 606f9ce3-90f2-442c-aac7-d2a24a61f180
+md"""
+### Atomic swap
+There are situations where atomic reads and atomic writes are not enough to ensure syncronisation between threads.
+
+The example below is similar to the previous example, but now two tasks are waiting to process the data at the same time - we can call these _consumer tasks_.
+In this example there is no real need to have multiple tasks waiting, but one could imagine that the consumer tasks process a stream of data produced by the main producer task.
+
+Here, we use an extra atomic boolean `is_done` to signal to the consumer tasks that they should stop waiting for the data to be ready:
+"""
+
+# ╔═╡ 69652455-0e9f-4b2a-bbef-464841dc9bc5
+begin
+	function use_data_when_ready(
+		data::Ref{Int},
+		is_ready::Atomic{Bool},
+		is_done::Atomic{Bool},
+	)
+		# Check atomically if data is ready to be processed
+		while !(@atomic :acquire is_ready.x)
+			# If the other task already processed data, return
+			(@atomic :acquire is_done.x) && return nothing
+			# Only check once every 1 millisecond
+			sleep(0.001)
+		end
+		# Signal other task should not process the data,
+		# but should instead exit
+		@atomic :release is_ready.x = false
+		@atomic :release is_done.x = true
+		println(data[]) # Process data
+	end
+
+	function run_example()
+		data = Ref(0)
+		is_ready = Atomic{Bool}(false)
+		is_done = Atomic{Bool}(false)
+		# Spawn two tasks to process the data
+		tasks = map(1:2) do _
+			@spawn use_data_when_ready(data, is_ready, is_done)
+		end
+		sleep(0.1)
+		data[] = 1
+		@atomic :release is_ready.x = true
+		foreach(fetch, tasks) # wait for tasks
+		return nothing
+	end
+end;
+
+# ╔═╡ 175bc3f1-1a25-4d0a-b454-44b34b5efe11
+run_example()
+
+# ╔═╡ f2f2e703-9874-4872-958b-d653f9a8365a
+md"""
+The above example has a syncronisation bug. Can you spot it?
+
+It is possible for the two consumer tasks to simultaneously read `is_ready` and break out of the while loop, before either of them is able to set `is_ready.x = false` to disable the other task. It's unlikely, but absolutely possible.
+
+The underlying problem is that, while both the read from, and the write to `is_ready` are individual atomic operations, that's not enough in this example. What we need here is to do _both_ the reading and the writing as one single atomic operation.
+
+For this, we can use the `@atomicswap` macro. This sets a field and reads the old value in one atomic operation.
+In most other programming languages, atomic swap is called _atomic exchange_.
+
+We can use this to rewrite the while loop in the example above like so:
+
+```julia
+while !(@atomicswap :sequentially_consistent is_ready.x = false)
+	(@atomic :acquire is_done.x) && return nothing
+	sleep(0.001)
+end
+```
+
+This will _guarantee_ that, if `is_ready` is only set to `true` once, then only one of the tasks will break out of the while loop.
+"""
+
+# ╔═╡ 9d335a94-9b57-4624-a0f0-b54829a951e5
+md"""
+#### Ordering: Acquire-release
+In the `@atomicswap` example above, I used the sequentially consistent memory ordering. This is because we need both the read and the write to be atomic at the same time, and the acquire and release orderings are only for reads and writes, respectively.
+
+In reality, this is exactly the kind of situation where the _acquire-release_ ordering is supposed to be used. This ordering provides both the guarantees of the acquire ordering and the release ordering.
+
+So, if acquire-release both places a memory barrier in the before => after direction (like `:release` provides) and an after => before barrier like `:acquire`, what is then the difference from sequentially consistent?
+
+Honestly, I still don't understand. Apparently, sequentially consistent is even more strict than acquire-release, because only sequentially consistent operations are guaranteed to be part of a global, total modification order - whatever that means.
+"""
+
+# ╔═╡ fc8d9128-9788-416f-b387-575c87e73360
+md"""
+### Atomic replace
+The most advanced operation operations are the _atomic replace_ operations, also called _atomic compare and swap_, or _atomic compare and exchange_.
+
+An atomic replace is like a conditional swap: The value is swapped, but only if the old value was equal to some expected value.
+
+In Julia, the macro `@atomicreplace atomic.fieldname expected => new` works just like the below function, except that it does everything in a single, atomic operation:
+
+
+```julia
+function atomic_replace(atomic, fieldname, expected, new)
+	old = getfield(atomic, fieldname)
+	success = old == expected
+	if success
+		setfield!(atomic, fieldname, new)
+	end
+	return (; old, success)
+end
+```
+
+These operations take _two_ memory orderings: One to be followed if the swap is successful, and another if the swap failed.
+
+Below is a simplified example of how to use atomic replace, where the atomic replace operation gurantees that the queue is only emptied if there is exactly 5 elements.
+"""
+
+# ╔═╡ 62b369f9-15f7-4737-8dda-40211f8f22c0
+begin
+	function empty_queue_if_full(queue::Atomic{Int})
+		# Queue can have a maximum of 5 elements
+		if (@atomicreplace :release :acquire queue.x 5 => 0).success
+			process_queue()
+		end
+	end
+
+	function add_to_queue_unless_full(queue::Atomic{Int})
+		compute_stuff_to_add_to_queue()
+		while (@atomic :aquire queue.x) >= 5
+			sleep(0.001)
+		end
+		(@atomic :release queue.x += 1)
+	end
+end;
+
+# ╔═╡ 69b86287-ad33-486a-9b70-b4eacb443f43
+md"""
+### Atomics are mostly used to implement other async abstractions
+Atomic operations provide the lowest level abstractions for async, being essentially async-friendly single CPU instructions.
+
+But they aren't exactly user friendly. Not just because of their low level, but also because their memory ordering and the happens-before relationship is tricky to reason about.
+
+Direct use of atomics can also be extremely _inefficient_.
+For example, the `return_when_ready` function implemented above will continuously check whether the shared value is ready, consuming CPU cycles in the process.
+It would be much better if the function instead could be paused and only resumed once the value was ready.
+
+In practice, most use cases of async don't directly use atomics, but will instead control tasks through  more user-friendly higher level abstractions implemented in terms of atomic operations.
+
+Before we turn to those abstractions, let's look at what makes up a task itself.
+"""
 
 # ╔═╡ 1d70bc25-b941-4481-8579-80b70e7b6846
 md"""
-## Julia async under the hood
-As you might have garnered from the brief description above, Julia's system of async is quite high level,
-with the language abstracting away most of the details of how exactly each task is run on the different threads, allowing the programmer to get stuff done with little ceremony.
+## Tasks and task switching
+In order to be suspended and resumed, a task needs to keep track of its current progress. The progress of a task, or its state, is comprised of two parts:
 
-Let's peel these layers of abstraction back, and look deeper into it.
-
-### What is a task, really?
-In order to be suspended and resumed, a task needs to keep track of its current
-progress. The progress of a task, or its state, is defined to two things:
-
-First, the current state of the CPU registers. If the compiler statically knows
-all the points in the code where a task can be suspended,
-the compiler may make sure only a small subset of the registers
-are in use at that time, such that the task needs to store less state.
-As we will see, in Julia, tasks voluntarily gives away control to another task, and so the compiler
-is able to do this optimisation.
+First, the current state of the CPU registers. If the compiler statically knows all the points in the code where a task can be suspended, the compiler may make sure only a small subset of the registers are in use at that time, such that the task needs to store less state.
+As we will see, in Julia, when Julia tasks yields control to other tasks, it's always voluntary, and so the compiler is able to do this optimisation.
 
 Second, a task needs a _stack_. This is the same kind of basic stack used by all
 programs, which we know and love from e.g. stack overflow errors.
@@ -207,18 +640,17 @@ the stack into the registers upon resuming the task.
 This ensures that the stack contains all the information needed to resume a paused
 task.
 
-In Julia, tasks carry their own independent stack. This fact causes stacks to cost
-some time and memory (16 KiB-ish) to instantiate.
+In Julia, tasks carry their own independent stack. That makes them easier to work with, but makes them cost around 16 KiB memory to instantiate.
 """
 
 # ╔═╡ 6b900c42-127e-463f-b941-c321297537f3
 md"""
 ### How does task switching work?
-Conceptually and implementation wise, there are several similarities between
+Conceptually _and_ implementation wise, there are several similarities between
 a _function call_ and a _task switch_.
 At a function call, the CPU will pause the execution of the current function and
 give control to a different piece of code, which is then automatically returned to
-when the function returns. The similarities to task switching are obvious.
+when the function returns. The parallels to task switching are obvious.
 
 So: How do function calls work?
 
@@ -239,17 +671,15 @@ the stack, and pop them from the stack back into the registers, in order to rest
 them, before returning.
 
 Therefore, any _caller_ can assume no callee changes these registers, and can store
-information in them. Any state that can't be kept in these registers are pushed
-to the stack.
-Aside from the callee saved registers, the CPU only needs to store the aforementioned rip
-register on the stack, in order to restore the CPU state.
+information in them. Any state that can't be kept in these registers are pushed to the stack.
+Aside from the callee saved registers, the CPU only needs to store the aforementioned rip register on the stack, in order to be able to return the execution to where it left off, and thus fully restore the CPU state.
 
 So, to call a function, the CPU needs to:
 1. Store all local state in either the seven callee-saved registers or on the stack,
-2. Push the rip register to the stack
+2. Push the rip register to the stack, to save the exact location where the call happened, such that the code can jump back to the location upon function return
 3. Move the memory location of the callee into the rip register
 
-The `call` assembly instruction will do the last two points.
+The `call` assembly instruction will do the last two points and comprise the actual function call itself.
 
 When the callee has been executed, and control needs to return to the caller,
 this is what needs to happen:
@@ -258,11 +688,12 @@ this is what needs to happen:
    the callee found it in
 2. Pop the stack into the rip register. Since the last element on the stack placed
    by the caller was the rip register, doing this returns execution to the instruction
-   immediately after `call` in the caller.
+   immediately after `call` in the caller, and allows the caller to continue executing.
 
-The `ret` instruction will pop the last element of the stack into the rip register.
+The `ret` instruction will pop the last element of the stack into the rip register, thus returning from the function.
 
-Task switching then, is quite similar to function calling: When a task gives control,
+We can use the same general approach when switching tasks:
+When a task gives away control to another task,
 it pushes its callee-saved registers and the rip register to the stack.
 To resume control of a task, all it needs is a pointer to its stack, from which
 it will pop offs its register state and then resume execution by popping off the
@@ -278,29 +709,69 @@ of user code - to be aware of which other tasks are awaiting to be switched to,
 and also to know when to switch to them. How could a library developer possibly
 know what other code is running in a given session that should be switched to?
 
-Instead, a program called the scheduler keeps track of all tasks in the process.
-The scheduler is a C program part of the Julia runtime, similar to the garbage
-collecter.
-Having a single centralized program to control task switches makes things much
-easier for the programmer: Every task simply switches to the scheduler, which
-controls which task to switch to next.
-If the Julia process has multiple threads, the scheduler may run multiple tasks
-simultaneously.
+Instead, a program called the _scheduler_ keeps track of all tasks in the process.
+The scheduler is a C program that is part of the Julia runtime, similar to the garbage collecter.
+Having a single centralized program to control task switches makes things much easier for the programmer: Every task simply switches to the scheduler, which controls which task to switch to next.
+If the Julia process has multiple threads, the scheduler may run multiple tasks simultaneously.
 
 User code may switch to the scheduler explicitly with the `yield` function.
-More commonly, any _blocking operation_ automatically switch to the scheduler.
-A blocking operation is an operation that needs to wait for something.
-We've already seen some blocking operations: The channel operations `put!` and
-`take!` block if they aren't able to push or pop elements immediately.
-So do fetching a task (if the task hasn't finished), and locking a lock (if it's
-already locked).
-In Julia, I/O operations that interact with resources provided by the operating
-system, like stdout, stderr, or files, also yield control to the Julia scheduler,
-since they require waiting for the operating system to provide the resource.
+More commonly, yields are built into a number function calls in Julia:
+* Memory allocation, including during dynamic dispatch will occassionaly yield
+* Interaction with outside sources, like IO will usually yield
+* Many operations on tasks and async-friendly data structures will yield
 
-The rationale of blocking operations is that, if a task needs to wait for e.g.
-the filesystem or a lock, then the scheduler might as well switch to another task
-that is maybe able to do work.
+#### Blocking and non-blocking IO
+When a Julia program needs access to your computer's resources, such as when opening a file, Julia needs to interact with the operating system to request them.
+Especially for IO-related resources like the file system and network, they may not be immediately available. What's the rational thing to do then?
+
+Typically, we distinguish between _blocking_ and _non-blocking_ operations. When executing a blocking operation, the program will halt and wait for the resource to be available, before progressing. In contrast, a non-blocking operation will return some kind of object representing a soon-to-be-available resource, and immediately return. The code can then intermittently check the object whether the resource has become available yet, and switch to other tasks to do useful work in the meantime.
+
+This is the reason that async is often mentioned in the context of network programming: Networks are especially slow, so writing asyncronous code that uses non-blocking IO may reap large benefits. 
+
+In Julia, all IO is non-blocking _from OS' point of view_, in the sense that the OS, when a resource is requested, will return control back to the Julia scheduler immediately.
+However, from the point of view of a _Julia task_, IO is always blocking, in the sense that the scheduler will make sure to not schedule the task that requested the resource, until the OS has informed the scheduler that the resource is ready.
+
+Therefore, in Julia lingo, when we talk about a blocking operation, we refer to an operation which yields control to the scheduler, and where the scheduler won't reschedule the task until the blocking operation is ready.
+We will return to various blocking operations later in this notebook.
+"""
+
+# ╔═╡ 766372a3-fb2c-4e86-8916-37bcaf9c0d79
+md"""
+### The Julia scheduler and the OS scheduler
+The purpose of the Julia scheduler is to run Julia tasks on the limited number of threads provided by the operating system. 
+Your operating system (OS) also has a scheduler, whose analogous job it is to map threads only the limited number of CPU cores provided by the hardware.
+
+This raises a question: If the OS _already_ has a scheduler which maps an arbitrary number of threads onto your CPU cores, why does Julia even bother with a scheduler itself? Why doesn't every task simply spawn an OS level thread, and then let the OS efficiently manage the threads?
+
+As usual, the reason is efficiency. The OS scheduler needs to keep more state related to each thread, including the per-process available memory. Also, since the OS needs to handle a more varied set of events like e.g. a signal from the network card or the keyboard, the OS scheduler is more complex and needs more book-keeping. 
+All this means that creating and managing OS-level threads is slower than managing Julia-level tasks.
+Tasks which are managed by the language runtime's own scheduler, and which can be switched to and from without interacting with the operating system are also called _green threads_, and are also used in other languages such as Go.
+"""
+
+# ╔═╡ fc185cbe-37a2-45ba-bb5c-de3441722a70
+md"""
+### Cooperative multitasking and interrupts 
+We've seen how one task is able to yield control to the scheduler (or another task).
+A system of asyncronous programming that relies on tasks freely yielding control is called _cooperative multitasking_, as opposed to a system where the scheduler is able to stop other tasks, called _preemptive multitasking_.
+For now, as of Julia 1.12, Julia's system of async is entirely cooperative: Tasks must yield explicitly or implicitly, to be stopped.
+
+Unfortunately, it's pretty easy to write code that does not allocate or otherwise yield explicitly, but which can run for a long time.
+For example, the naive implementation of the fibonacci function:
+"""
+
+# ╔═╡ 87a0896d-38a8-4b44-84b9-8d35a284338d
+fib(x) = x < 2 ? x : fib(x - 2) + fib(x - 1);
+
+# ╔═╡ 5e644139-6db6-49a9-ab68-7ad8c872d483
+# No allocations, no yielding
+@time fib(35)
+
+# ╔═╡ 49629d75-2824-4938-999f-d02b65cc8c29
+md"""
+In the _best_ case scenario, scheduling a long-running task which doesn't yield will prevent other tasks from being run.
+
+As we will see in a moment, non-yielding tasks can have even worse consequences.
+As a programmer, the best policy is to never write tasks that don't occasionally yield.
 """
 
 # ╔═╡ 5688d79a-0593-4722-b4f6-252b327746b2
@@ -308,19 +779,16 @@ md"""
 ### Tasks and the garbage collector
 When the garbage collector (GC) runs, it mutates the data structure that keeps track
 of heap allocations.
-As the golden rule of async goes, _Mutation requires exclusivity_.
+As the golden rule of async goes, _mutation requires exclusivity_.
 That means no other task can allocate memory at the same time as the garbage collector runs.
-Practically speaking, this means that when one tasks triggers the GC, the GC can't run
-until all other tasks has been blocked  - we say that Julia's GC is a stop-the-world GC.
+Practically speaking, this means that when one tasks triggers the GC, the GC can't run until all other tasks has been blocked, lest they allocate and cause a data race in the GC - we say that Julia's GC is a stop-the-world GC.
 In turn, that means that all running tasks need to know that the GC wants to run,
-such that they can yield.
+such that they can yield and allow it to.
 How is this coordinated?
 
-When the GC wants to run, it modifies a pointer in the thread-local state to
-an invalid memory location.
+When the GC wants to run, it modifies a globally available pointer to an invalid memory location.
 The function `GC.safepoint()` loads data from this pointer. If the pointer is
-invalid, this triggers a SIGSEGV (segfault signal), which is handled by Julia's custom SIGSEGV handler,
-to block the current thread.
+invalid, this triggers a SIGSEGV (segfault signal), which is handled by Julia's custom SIGSEGV handler, to block the current thread until the GC has been run.
 If the pointer is valid (i.e. the GC has not signalled it wants to run), this pointer load has no effect and takes only half a nanosecond.
 Therefore, calls to the `GC.safepoint()` is peppered across various functions in the Julia runtime, like memory allocation or IO.
 
@@ -330,241 +798,500 @@ First, allocation-heavy code should be expected to scale worse with the number o
 because each thread creates garbage, so the GC needs to run more often, pausing every other thread.
 
 Second, users need to be wary not to write code where _one_ task allocates memory, triggering the GC, when _another_ is running code that does not call `GC.safepoint()`, by allocating, doing IO, yielding to the schedular or doing dynamic dispatch.
-If this happens, the first task will trigger the GC, blocking all tasks with safepoints, while the safepoint-less task will continue to run. In the worst case, this can lead to deadlocks.
+If this happens, the first task will trigger the GC, blocking all tasks with safepoints, while the safepoint-less task will continue to run.
 This issue occur most commonly when one task calls external code, such as a C library.
 """
 
-# ╔═╡ a0ed20e1-da3f-4dbc-83b1-1399f0dea805
+# ╔═╡ 545e5844-1624-4f5d-b0bc-fa900cd8562c
 md"""
-## High level interface
-I won't go through all the various different async-related APIs here,
-but just a selection of the ones I find the most useful.
+### False sharing
+A modern CPU will cache recently accessed memory in a faster CPU cache, in order to speed up future access to the same memory.
+In modern, multi-core CPUs, some of the cache may be shared between cores, whereas other part of the cache is core-specific. Keeping the caches _coherent_, i.e. making sure that multiple caches of the same memory, each with a CPU core that writes to the cache, all agree on what is actually in memory at any given time is a massive coordiation headache.
+Let's all appreciate the hardware designers who have worked hard to solve this problem for us programmers - as long as we remember to use atomic operations, we can mostly ignore the existence of cache coherence at all.
 
-#### Tasks
-A `Task` is most easily created and started with the `Threads.@spawn` macro:
+_Mostly_. There is one case I know of where the problem of cache coherence rears its head and appears to us programmers, and that is _false sharing_.
 
-@@juliacode
-```
-julia> using .Threads
+When the CPU cache copies data, it copies whole _cache lines_, usually 64 consecutive bytes, depending on your specific CPU model.
+The CPU's _cache coherence protocol_ keeps track of which cache lines has been altered by one core. If another core requests the same cache line, the line needs to be syncronized between cores.
 
-julia> task = @spawn begin
-       x = 1 + 1
-       sleep(5)
-       x + 1
-       end
-Task (runnable, started) @0x0000788908e3fd00
-```
-@@
+This has implication for asyncronous code: If one task mutates a piece of data, then all other data allocated on the same cache line will be slower to access for tasks running on another core.
+We call this _false sharing_, because even though no single object is shared between tasks, different objects allocated on the same cache line still needs to use the cache coherence protocol just as if they were.
 
-Julia is now free to run the task whenever it wants to, on whatever thread it wants
-to, and will do so at the first given opportunity.
-The `@spawn` macro returns instantly while the task is running in the background.
+We can demonstrate it with the code below, which increments every element in an array on multiple tasks in parallell: In the `update_bytes_bad` case, the tasks operate on interleaved elements of the vector. With one byte per element, this means a single cache line contains 64 elements, so all eight tasks will write to the same cache line at the same time.
+In the function `update_bytes_good`, the tasks are given non-overlapping chunks of the array to process.
 
-When you call `fetch` on the task, Julia will wait for the task to finish, and
-return the result of the task - or throw a `TaskFailedException` if the computation
-in the task threw an error:
+The timings you see depend very much on your precise brand of CPU.
+"""
 
-@@juliacode
-```
-julia> fetch(task)
-3
-```
-@@
+# ╔═╡ 9a6d75a0-0f0c-4909-886d-9a2377ef0ee7
+begin
+	function update_bytes_bad(v::Vector{UInt8}, offset::Int)
+		for _ in 1:1000, i in 1+offset:8:length(v)
+			v[i] += 0x01
+		end
+	end
 
-Julia currently doesn't do any type inference across tasks, so the result of `fetch`
-is always inferred to just `Any` - hopefully, this will change in the future. 
+	function update_bytes_good(v::Vector{UInt8}, offset::Int)
+		len = div(length(v), 8)
+		for _ in 1:1000, i in offset*len+1:(offset+1):len
+			v[i] += 0x01
+		end
+	end
+	
+	function false_share(f)
+		v = zeros(UInt8, 2^20)
+		tasks = map(1:8) do i
+			@spawn f(v, i-1)
+		end
+		foreach(wait, tasks)
+	end
+end;
 
-Spawning, running and fetching a task has some overhead. On my laptop, it takes
-between one and five microseconds, depending on the circumstance, and consumes
-about 16 KiB RAM.
+# ╔═╡ 05524538-352d-4dff-9f24-5844b46635c8
+@btime false_share(update_bytes_bad)
 
-#### `@sync`
-If you spawn tens of tasks, it can be cumbersome to store them all and properly
-call `fetch` on them.
-The `@sync` macro can be applied to a block of code. This block of code will then
-not complete until all tasks spawned in that block has finished:
+# ╔═╡ af561fc4-9b1b-405a-90a6-8bc18e93bf3f
+@btime false_share(update_bytes_good)
 
-@@juliacode
-```
-julia> @sync begin
-           @spawn some_work()
-           @spawn other_work()
-       end
-       # Here, both task spawned are guaranteed to have finished
-```
-@@
+# ╔═╡ 602d6b6d-24b2-4cd8-901d-f893772745fb
+md"""
+## Higher level syncronisation abstracts
+The abstractions provided by atomic operations are too low level for most programmer's taste.
+Luckily, Julia provide a whole bunch of abstractions to make our asyncronous lives easier.
 
-Note that `@sync` only works on tasks spawned directly in the expression on which
-`@sync` operates. If `@sync` is applied to e.g. a function which spawns a task,
-`@sync` will not know about this task.
+### Locks: The simple spinlock
+A _lock_ is a data structure used to ensure only one task has access to a piece of data at a time.
+They also have a more illistrative name: _Mutexes_, short for _mutual exclusion_.
 
-#### `@threads`
-The `@threads` macro is a convenience method that spawns a number of tasks
-and then share the iterations of a for-loop between the tasks.
-When the 'threaded' for-loop ends, all the tasks are guaranteed to have finished.
-It really should have been named `@tasks`.
+When a task calls `lock` on a lock (also called _taking_ or _acquiring_ the lock), it is said to _hold the lock_.
+If another task tries to take a lock that is already held, the task will be blocked.
+Once the task holding the lock has called `unlock` on the lock, the waiting tasks will be unblocked, and the lock available for other tasks to take.
 
-The precise meaning of how many tasks it spawns and how it splits the iterations
-between them can be configued.
-The default will call `firstindex` and `lastindex` on the thing you're looping
-over in order to compute how to split the iterations between the tasks.
-The precise manner of the default is subject to change:
+To illustrate locks, let's implement a poor man's version of a _spinlock_, the simplest type of lock.
+"""
 
-@@juliacode
-```
-julia> @threads for i in 1:10
-           println("Doing iteration $i")
-       end
-Doing iteration 6
-Doing iteration 5
-Doing iteration 3
-Doing iteration 7
-Doing iteration 8
-Doing iteration 4
-Doing iteration 1
-Doing iteration 10
-Doing iteration 2
-Doing iteration 9
-```
-@@
+# ╔═╡ 354447dc-030a-4ced-a2cf-3fa89865933e
+begin
+	mutable struct SimpleSpinLock <: Base.AbstractLock
+		@atomic held::Bool
+		
+		SimpleSpinLock() = new(false)
+	end
 
-`@threads` have quite high level 'don't think about it' API. One one hand, this
-makes it simple to use. On the other, it means you can assume very little about
-how the individual iterations are run.
-For this reason, you should always assume the iterations can run in any arbitrary
-order, including simultaneously (or in reverse order, for that matter).
+	function Base.lock(lck::SimpleSpinLock)
+		while (@atomicswap :acquire lck.held = true)
+			yield()
+		end
+		return nothing
+	end
 
-#### Locks
-The `ReentrantLock` data type is the only type of lock in Base Julia that is suitable
-for general use.
-Locks are only good for one thing: Ensuring that only one task accesses a piece
-of data at a given time.
+	function Base.unlock(lck::SimpleSpinLock)
+		if !(@atomicswap :release lck.held = false)
+			throw(ConcurrencyViolationError("Unlocked an unlocked SpinLock"))
+		end
+	end
+end;
 
-A task can `lock` a lock, and a locked lock can then be `unlock`ed again by the same task.
-A lock can only be locked by one task at a time. If task A attempts to lock a lock
-locked by task B, task A will wait patiently for task B to unlock it first.
+# ╔═╡ 1c5c9cc7-de24-4784-9b0a-649a9a513d63
+md"""
+The defining property of a spinlock is that `lock` is implemented as a simple while loop.
 
-Conveniently, the `@lock l expr` macro expands to:
+Using this lock, we can now mutate some data asyncronously in multiple tasks at once, without worrying about violating the law of async.
+Let's demonstrate this by pushing to a vector on two tasks in parallel.
 
-@@juliacode
-```
-lock(l)
-try
-    expr
-finally
-    unlock(l)
-end
-```
-@@
-
-Which makes sure the lock is unlocked by the task running the macro, even if the
-expression errors.
-
-#### Channels
-A `Channel` can be thought of as a collection, similar to a `Vector`, which has
-all its operations guarded by locks.
-This means you can freely operate on a channel with any number of threads at a time,
-since the locks stored inside the channel will make sure that the golden rule of
-async is never broken.
-A `Channel` has a size - that's maximum number of elements it can contain. 
-
-* `put!(::Channel, ::Any)` puts an element into the channel if there is room.
-  If not, it will wait until there is room.
-* `take!(::Channel)` removes and returns the first element in the channel,
-  similar to `popfirst!`. If there are no elements, it will wait until an
-  element appears.
-  If a channel has size zero, and one task waits for a `put!` call and another
-  waits or a `take!` call, then the two `put!` and `take!` calls will both succeed.
-* `close(::Channel)` closes the channel. This causes any `put!` calls to throw
-  an error, and any `take!` on an empty, closed channel will also throw.
-
-Channels can be iterated over. This will repeatedly call `take!`, once for each
-iteration. If a channel is iterated over, and it is closed, and empty, the
-iteration will end and not throw an error.
-
-You can also bind channels to tasks, such that the channel will be automatically
-closed when the task ends.
-
-That was a lot of stuff - anyway, the point is that channels, because they can be
-safely operated on by multiple threads, serve as a foundation for coordinating
-multiple tasks.
-
-## Useful, high-level patterns
-#### Compute a bunch of data in parallel
-The easiest thing here is to write a `@thread`ed loop that puts the result
-of each task into a vector:
-
-@@juliacode
-```
-result = Vector{MyType}(undef, length(data))
-@threads for (i, data_i) in collect(enumerate(data))
-    result[i] = some_computation(data_i)
-end
-```
-@@
-
-Note that we need to collect the `enumerate`, because `enumerate` currently
-doesn't define `firstindex` needed by the `@threads` macro.
-
-#### Lower-level parallelism
-Whenever you have a function that computes several things that has no dependency
-between them, like this:
-
-@@juliacode
-```
-function foo()
-    x = bar()
-    y = qux() # no dependency on x
-    z = baz() # no dep. on x or y
-    return (x, y, z)
-end
-```
-@@
-
-You can run them in different tasks, like this:
-
-@@juliacode
-```
-function foo()
-    x = @spawn bar()
-    y = @spawn qux()
-    # baz runs in the current task, no need to spawn a new
-    # task for that
-    z = baz()
-    return (fetch(x)::MyType, fetch(y)::MyType, z)
-end
-```
-@@
-
-However, do remember that the overhead associated with each task is up to five
-microsecond, so the runtime of `bar` and `qux` must be longer for this pattern
-to be a net benefit.
-
-#### Parallel loop with one serial bottleneck
-If you have an loop that _almost_ could have been be run in parallel, _except_
-for one thread-unsafe operation, use the normal `@threads` pattern, and guard
-the thread-unsafe operation behind a lock.
-This is particularly easy with the `Base.Lockable` type (exported from Base in
-Julia 1.12)
-
-@@juliacode
-```
-cache = Base.Lockable(Dict())
-@threads for data_i in data
-    @lock cache maybe_res = get(cache[], data_i, nothing)
-    result_i = if isnothing(maybe_res)
-        result_i = some_computation(data)
-        @lock cache[][data_i] = result_i
-    else
-        maybe_res
+Below, I'll use method `lock(::Function, ::AbstractLock)`, which is defined as:
+```julia
+function lock(f, l::AbstractLock)
+    lock(l)
+    try
+        return f()
+    finally
+        unlock(l)
     end
-    # Do something with result_i
 end
 ```
-@@
+This is generally preferred to use this function, in order to make sure the lock is never held indefinitely by a task that throws an error.
 
-#### Packages for async
-The package OhMyThreads.jl provide nice high-level APIs for working with tasks.
+The general pattern to use locks - and by extension - the general pattern when mutating data shared between tasks, is:
+```julia
+lock(my_lock) do
+	do_work(my_data_structure)
+end
+```
+
+Alternatively, the equivalent `@lock` macro may be used as in:
+```julia
+@lock my_lock do_work(my_data_structure)
+```
+
+Or, here, concretely:
+"""
+
+# ╔═╡ 97220abd-8334-45ca-895f-2e9d76dd77cd
+function puts_lots(lck::SimpleSpinLock, v::Vector{Int})
+	for i in 1:100
+		lock(lck) do
+			push!(v, i)
+		end
+		# I only add this sleep to make sure one task doesn't
+		# finish before another starts to show our lock works
+		sleep(0.001)
+	end
+end;
+
+# ╔═╡ bf2a766b-1d44-485a-a837-f96d549d09fd
+begin
+	v = Int[]
+	lck = SimpleSpinLock()
+	t = @spawn puts_lots(lck, v)
+	puts_lots(lck, v)
+	fetch(t)
+end
+
+# ╔═╡ ca20d8be-b038-46dc-bc37-898e2482ac09
+md"""
+Locks nicely abstract the underlying atomic operations, but they still have sharp edges.
+Since tasks will wait for a lock indefinitely until it is released, it's easy to create a situation where a task is waiting for a lock to be released, but the unlocking of the lock is dependent on the task, which is stuck waiting.
+
+For example, if you try to implement a recursive function that takes a spinlock, the first call will take the lock, and then the function will call itself, attempt to take the lock again, and get stuck.
+
+When this happens, the program will never progress.
+Such a situation is called a _deadlock_.
+
+The vulnerability to deadlocks comes from the nature of locks themselves, being essentially while loops.
+There is no principled way to avoid them.
+
+As the simplest kind of while loop, spinlocks bring both advantages as disadvantages:
+One one hand, the tight while loop means that spin locks have low latency - once the lock is unlocked, a waiting task will almost immediately be able to take it.
+
+On the other hand, each waiting task is kept busy by the continual while loop. If there are many tasks waiting, or if the wait time can be expected to be long, this represents a lot of pointless work for the computer.
+
+Mostly, people shouldn't use spinlocks. With the help of something called a _condition_, we can build a better type of lock.
+
+### Conditions
+A condition is used to signal between tasks that something is ready.
+When a task waits for a condition, it becomes blocked, yielding to the scheduler.
+Then, when a notification is sent to the condition, the waiting tasks are woken up and rescheduled. 
+
+Compared to a spinlock, the main advantage of a condition is that a task waiting for a condition don't use the CPU.
+
+In Julia, we can use `Threads.Condition` to create a condition, and use it with `wait(::Threads.Condition)` and `notify(::Threads.Condition)`.
+Just like a lock is taken with the `lock` function, so must a condition be taken with `lock` to call `wait` or `notify`.
+Note that a successful call to `wait` will automatically unlock the condition immediately _before_ the waiting task yields.
+
+Let's re-implement one of the earlier examples, where I used an atomic as a condition, and waited for it in an inefficient while loop:
+"""
+
+# ╔═╡ 5cae8006-d72f-4771-8588-ae7bddc6ab6b
+function mark_when_ready(is_ready::Threads.Condition, shared)
+	sleep(0.2) # do some computation
+	shared[] = 42
+	@lock is_ready notify(is_ready)
+end;
+
+# ╔═╡ 3f80113b-669a-44d8-86d6-471c43154958
+function return_when_ready(is_ready::Threads.Condition, shared)
+	@lock is_ready wait(is_ready)
+	shared[]
+end;
+
+# ╔═╡ 96d968b3-4662-4985-9a81-7fe6cdcbb524
+let
+	is_ready = Atomic{Bool}(false)
+	shared = Ref(0)
+	t = @spawn return_when_ready(is_ready, shared)
+	sleep(0.1)
+	mark_when_ready(is_ready, shared)
+	wait(t)
+	shared[]
+end
+
+# ╔═╡ b3b9c83b-167e-4de7-b824-ef2a754bc91b
+let
+	is_ready = Threads.Condition()
+	shared = Ref(0)
+	t = @spawn return_when_ready(is_ready, shared)
+	sleep(0.1)
+	mark_when_ready(is_ready, shared)
+	wait(t)
+	shared[]
+end
+
+# ╔═╡ b16fee73-48e2-4de3-8a51-bf6684e15e17
+md"""
+### ReentrantLock
+Spinlocks provide low latency, but occupy the CPU and scheduler when they are waiting to be taken. On the contrary, conditions allow a task to wait without using the CPU.
+
+In Julia, the `ReentrantLock` combines the strengths of both spinlocks and conditions: When a task tries to take a `ReentrantLock`, it first acts like a spinlock for a few iterations.
+If the task has still not succeeded in taking the lock, it will wait to be notified when the lock is unlocked, so it can get back to trying to take the lock.
+
+This hybrid approach makes `ReentrantLock` versatile and earn its place as the default lock type in Julia.
+Spinlocks _are_ available as `Threads.SpinLock`, but should essentially never be used.
+
+The name `ReentrantLock` comes from their _reentrancy_.
+In this context, it means that the same task can take, and release the lock an arbitrary amount of times without deadlocking.
+This makes reentrant locks usable in recursive algorithms.
+
+### Lockable
+Locks are mostly used to protect some other value from being accessed concurrently.
+That requires the user to remember what data goes with which lock, which suggests the user interface could be improved somehow. Enter `Lockable`.
+
+A `Lockable{T, L <: AbstractLock}` wraps a value of type `T` and a lock (which defaults to a `ReentrantLock`).
+The value can be accessed with `Base.getindex`, as in `my_lockable[]`, but only when the lockable is locked.
+In my opinion, this is a straight up improvement on the API of locks.
+
+So, idiomatic use of a lock could look like below - barring of course the contrivedness of adding two numbers by taking a lock one million times.
+"""
+
+# ╔═╡ 0d5d8b7e-5045-4880-b9e3-d86e1ff3af2c
+let
+	lockable = Base.Lockable(Ref(0))
+	tasks = map(1:10) do _
+		@spawn begin
+			for i in 1:100_000
+				# Two Base.getindex, once for the lockable,
+				# and once for the RefValue
+				@lock lockable lockable[][] += 1
+			end
+		end
+	end
+	foreach(wait, tasks)
+	@lock lockable lockable[][]
+end		
+
+# ╔═╡ fb968464-b790-4fe0-ba3b-2bd55c159f3f
+md"""
+### Semaphore
+A semaphore is a lock that can be held N times at once, by different tasks if necessary.
+Any task that tries to take a semaphore that is already held N times will block until one of the tasks that holds the semaphore releases it.
+For some reason, a `Base.Semaphore` doesn't use the functions `lock` and `unlock`, but instead `Base.acquire` and `Base.release`
+In this view, locks can be seen as a special case of semaphore that has N = 1.
+
+Semaphores are used more rarely than locks, because the main use case for locks is to ensure that only a single task has exclusive access to data, such that the data can be mutated.
+_Mutation requires exclusivity_, as you know.
+
+One situation where semaphores are useful is when you are launching external code from Julia tasks.
+Say, for example, you want to run some single threaded shell command.
+You might want to only run `Threads.nthreads()` commands at the same time, since there is no point to running more commands than the OS's scheduler can run on the available CPU cores.
+The issue here is that the Julia scheduler is not aware that spawning a shell command takes up resources in the background, and so it will happily launch all the tasks at once.
+
+In this case, you can do something like:
+"""
+
+# ╔═╡ 4aa430d1-3efc-4e88-ab58-4a5448815567
+# Here, each command takes 0.5 second, and we run 8 at a time.
+# So this should take 1.5 seconds
+begin
+	tasks = Task[]
+	semaphore = Base.Semaphore(8)
+	tasks = map('A':'X') do letter
+		@spawn begin
+			Base.acquire(semaphore) do
+				sleep(0.5)
+				io = Base.BufferStream()
+				run(pipeline(`echo $(letter)`, io))
+				close(io)
+				String(strip(String(read(io))))
+			end
+		end
+	end
+	join(map(fetch, tasks))
+end	
+
+# ╔═╡ 97e2f87b-b7a8-4ab2-b55a-28bbb86309d9
+md"""
+### Channel
+A channel is a simple collection of elements, a little like a `Vector`, where all its operations are guarded by a lock.
+Channels are intended to be used to pass values between tasks.
+
+Even though they are conceptually similar to threadsafe vectors, they have slightly different semantics.
+For one, channels have a capacity - the maximum number of elements it can store before it's full - which defaults to zero.
+The functions used to mutate channels are also slightly different from vectors:
+
+* `take!(::Channel)` will pop off the _first_ element of the channel (similar to `popfirst!`) if it is not empty.
+  If the channel is empty, the task will block until an element is available.
+
+* `put!(::Channel, x)` pushes `x` to the channel, if the channel isn't full. If it's full, the task will block until there is room in the channel.
+  A zero-capacity channel will detect if there is both a task waiting to `take!` and `put!`, and will pass the value directly one task to the other, unblocking them both.
+
+* A channel can be closed with `close`. Calling `put!` on a closed channel, or `take!` on a closed, empty channel will error.
+
+* Iterating over a channel is equivalent to calling `take!` in a loop, until the channel is closed and empty (in which case `iterate` returns `nothing` instead of throwing an error).
+
+A common use case of channels is where one or more tasks continually produce values, whereas others consume and process these values as they are coming in.
+For sake of example, suppose we're writing a program that recursively processes files in a directory subtree. We have one task crawl through the filesystem and identify the files to process, and a set of worker tasks that process these files:
+"""
+
+# ╔═╡ 3a30d8db-6730-4f5b-98fd-7aca5bbe8dc8
+begin
+	function produce(top_dir, channel::Channel{String})
+		for (directory, _, files) in walkdir(top_dir), file in files
+			if last(splitext(file)) == ".jl"
+				put!(channel, joinpath(directory, file))
+			end
+		end
+		close(channel)
+	end
+
+	function consume(channel)
+		for path in channel
+			sleep(0.5)
+			println("Found $(path)!")
+		end
+	end
+
+	function main(top_dir, n_threads)
+		channel = Channel{String}(2048)
+		producer = @spawn produce(top_dir, channel)
+		workers = map(1:n_threads) do _
+			@spawn consume(channel)
+		end
+		wait(producer)
+		close(channel)
+		foreach(wait, workers)
+	end
+end;
+
+# ╔═╡ b20ed863-cdf8-447b-923b-23339ba0e8cc
+main(".", 4)
+
+# ╔═╡ c8194ce4-f730-48ec-aaf7-9e2f3f9dcef7
+md"""
+## Useful high-level patterns
+### Macro `@threads`
+Most of my own use of async is pretty straightforward: I want to compute N things independently, and I want it to go faster by running them in parallel.
+That's when the macro `Threads.@threads` comes in handy. When placed in front of a for-loop, it spawns `Threads.nthreads()` tasks, and partitions the iterations among the tasks.
+
+Here's an example of how to use `@threads`
+"""
+
+# ╔═╡ a426d78d-f964-4d19-b5fa-7ef0c0d54341
+let
+	inputs = Set(1:16)
+	results = Vector{Int}(undef, length(inputs))
+	@threads for (i, input) in collect(enumerate(inputs))
+		sleep(rand() / 2) # do some computation
+		results[i] = input + 1 # store the results
+	end
+	results
+end
+
+# ╔═╡ cc343ccf-4648-4121-95ff-29b81bd9cf9b
+md"""
+A few notes on the code above:
+
+The macro takes an optional scheduling keyword, that determines how each iteration is split among the tasks. By default, this is `:dynamic`. The dynamic scheduler will partition the iterations roughly equally among the tasks.
+That's the reason I call `collect` on the enumeration - in order to be able to partition the iterable, it needs an indexable collection.
+Another downside is that some of the tasks may, by random chance, get a slice of the input elements that happen to take a shorter time to process. When that happens, your computer's potential for parallelism is not fully exploited, as some of the tasks will finish early and be idle.
+
+Alternatively, you can use `:greedy` scheduling. Here, a number of worker tasks are spawned, each of which will simply take the next available iteration. Under the hood, this in implemented similar to the `Channel` example above.
+Having each element go through channels incurs some overhead per element, but on the positive side, every worker task is kept maximally busy - and there is no need to `collect` an iterable, since the greedy scheduler doesn't need an indexible iterable.
+
+In some older texts on Julia parallelism, the author will recommend instead an **incorrect** pattern that relies on `threadid()` like this:
+
+```julia
+results = Vector{Int}(undef, Threads.nthreads())
+@threads for input in inputs
+	results[Threads.threadid()] = input + 1
+end
+```
+
+**This is buggy**, because the Julia scheduler may move tasks between threads at will, so there is no guarantee that the tasks will execute every loop iteration on different threads.
+
+#### OhMyThreads.jl
+The `@threads` macro is a little crude and often suboptimal. For example, it's not very advanced in how it partitions the input among the tasks, and there is no way to customise the number of tasks it spawns.
+
+For more customisability, see the package OhMyThreads.jl, which provides the similar, but more optimised and versatile `@tasks` macro.
+"""
+
+# ╔═╡ dbb7b9f6-da94-4bac-b172-c7a4bb31d5c4
+md"""
+### Macro `@sync`
+A common pattern in async code is that a function spawns a bunch of tasks to work in parallel, and then at some point, the function needs to make sure all the tasks are done before proceeding.
+In some of examples above, I've achieved this by creating a vector of tasks, then called `foreach(wait, tasks)`.
+
+What then, if one of the tasks throws an exception? Calling `wait` on a failed task will throw a `TaskFailedException`. Surely, this could be handled better.
+
+The `@sync` macro provides a convenient way to wait for multiple tasks, while also handling the case when one or more of them throws.
+The way it works is that any `@spawn` statement inside a block marked as `@sync` will be collected, and when the sync block ends, each task will be waited for. All the exceptions thrown by tasks will be collected into a `CompositeException` that will be thrown at the end of a sync block.
+For example:
+"""
+
+# ╔═╡ 59f4a2be-acc3-4aed-b1ef-e5d0dec70f51
+# No errors are thrown
+@sync begin
+	@spawn (sleep(0.5); println(2))
+	@spawn println(1)
+end
+
+# ╔═╡ a3c5932a-8ff9-4294-9130-9c661ed8dee6
+# Here, it throws an error
+try
+	@sync begin
+		@spawn (println(1))
+		@spawn (sleep(0.3); throw(ArgumentError("Some error!")))
+	end
+catch err
+	if err isa CompositeException
+		global comp_error # for inspection later
+		println("One or more of the tasks failed with the following errors!")
+		@show err.exceptions
+	else
+		rethrow() # this would definitely surprise us!
+	end
+end
+
+# ╔═╡ 5729484b-0467-403e-88f9-28677f03649d
+md"""
+Be aware that `@sync` is a macro, and therefore only operates on the _source code_ of the content of the sync block.
+That means it's only able to detect _literal_ `@spawn` blocks.
+If you e.g. write a function that spawns a task, and then call this function in the sync block, the macro will not be aware that a task was spawned and therefore will not do anything to syncronise that task.
+"""
+
+# ╔═╡ 513c6b05-23ed-4174-802a-2ade2acf2adc
+md"""
+#### The spawn-fetch pattern
+Another common pattern when you have a function that does two or more things which can run independently.
+For example, suppose you have a function that needs to read in both a config file and a data file, and then process the data according to the configuration.
+The processing depends on having read the two files, but the two files can be read in parallel.
+
+Here, I would use what I call the spawn-fetch pattern, where one or more tasks are spawned, and then almost immediately fetched.
+This is what it looks like:
+"""
+
+# ╔═╡ cc56cdff-9d19-46c1-934c-f436439a2980
+function process_by_configuration(data_path, config_path)
+	task = @spawn open(read_data, data_path)
+	open(read_config, config_path)
+	process(data, fetch(task)::Configuration)
+end;
+
+# ╔═╡ 5c1ac369-15ee-4b36-a7bc-5ff1ba8cd8b1
+md"""
+Above, the configuration file is being read while another task is reading the data file in the background, allowing the two to work in parallel. Then, the result of the task is fetched before proceeding. Remember that Julia currently doesn't do type inference across tasks, so I need to typeassert the return type of `fetch`.
+
+This pattern is only useful for relatively high level functions, because of the five second overhead associated with spawning and managing a task.
+Thus, if this pattern is used in low-level code, the benefit from parallelism will be outweighed by the task management overhead.
+"""
+
+# ╔═╡ a6172e40-8288-440f-b684-2268b218c3f3
+md"""
+## Avoid reasoning about threads in Julia
+Throughout this notebook, I have spoken of asyncronous code in terms of code running in multiple _tasks_, whereas other material on this topic usually centers on running multiple _threads_.
+
+In one sense, the distinction is straightforward, since there is a clear denotational difference: A _task_ is a piece of code that can be executed by the scheduler. A _thread_ is a resource provided by the operating system, upon which one task can be run at a time.
+
+However, systems differ in which of these two concepts are considered _central_, tasks or threads.
+As Julia's support for asyncronous code has improved, it has become increasingly apparent that tasks, and not threads, provide the most useful level of abstraction to work on, and that users should avoid reasoning about threads where practical.
+
+To continue the analogy between the garbage collector and scheduler, it is possible to reason about Julia data structures in terms of pointers to the memory addresses where the data is located.
+But this is a poor level of abstraction: Referring to objects by their memory location is both cumbersome, and also prevents important optimisations like stack-allocating memory transparently, and moving data in memory.
+Similarly, writing asyncronous code with threads in mind cause at least two issues that I know about:
+
+First, the author of a library can't know how many threads are available on the computer where the code is running, nor which other libraries are running asyncronous code concurrently.
+Therefore, the number of available and busy threads must be assumed to always be in flux.
+
+Second, the Julia scheduler may pause a task, then resume it on another thread. The fact that the current thread may change any time the concept of a current thread ephemeral and meaningless.
 """
 
 # ╔═╡ a305ee04-498a-4933-a813-8550f50a761d
@@ -572,14 +1299,15 @@ md"""
 ## The future of async in Julia
 Async has been an area of intense development in Julia since shortly after version
 1.0. It was deemed a priority to flesh out async quickly after 1.0, because it was
-feared that in the absence of async, the ecosystem might begin to rely too much
-on syncronicity, making async harder to add later.
-Even though the most important work on ay=sync has already been done, there are still
+feared that in the absence of a good set of abstractions for async, the Julia ecosystem might begin to rely too much on syncronicity, making async harder to add later.
+Even though the most important work on async has already been done, there are still
 a few areas that the core developers seek to improve:
 
 ### Inference in tasks
 Currently, Julia can't do inference across tasks. That implies that e.g. `fetch`
-is always inferred as `Any`. This is obviously annoying, and it'd be much nicer
+is always inferred as `Any`.
+Practically speaking, I recommend users to typeassert the results of `fetch`.
+This is obviously annoying, and it'd be much nicer
 if Julia had inter-task inference on the same level as inter-function inference.
 
 ### Better multithreaded garbage collection
@@ -596,34 +1324,39 @@ There are several ways the situation could be improved in the future:
   A function that doesn't allocate, or only allocates in a foreign function call,
   does not need to be stopped for the GC to run.
 
+### Task preemption
+Async in Julia is currently completely cooperative, meaning that the system relies on tasks voluntarily and frequently yielding to the scheduler.
+That requirement sets traps for casual users of async, who can too easily forget to check if their tasks actually do yield often enough. Tears ensue.
+
+Although there, to my knowledge, hasn't been any concrete initiatives, it's possible that Julia may introduce some limited preemption in the future, such that the scheduler may actively interrupt running tasks.
+The trick is how to devise a system where tasks may be interrupted while they are doing arbitrary computation, without interrupting them in the middle of some critical operation, thereby causing stack corruption or other awfulness.
+
+### Allow IO to run from other threads
+Some scheduler operations, such as IO and `Timer` callbacks, can currently operate on thread 1.
+This limitation awkwardly breaks the abstraction that all tasks may run on any thread, such that the user does not need to think about scheduling.
+
+For example, if the user writes a single task which does not yeild, and the scheduler woefully schedules that on thread 1, then no IO can run at all until that task yields again.
+If the unyielding task relies on an IO operation in order to complete, the system will deadlock.
+
+Practically speaking, this situation can be avoided by following the maxim to _never write an unyielding task_, but it's still unfortunate that the consequences of failing to do so are unnecessarily dire.
+
 ### Various optimisation
 Many of the important moving parts has not been thoroughly optimised.
 In particular, the core devs have long talked about making the `Task` objects
 faster and more memory efficent to create.
-The scheduler itself could also be optimised, and so could locks.
-"""
+That would enable lower level parallelism, such as using the spawn-fetch pattern more broadly.
 
-# ╔═╡ 7c750b87-b513-4a1b-9a4e-b4dea6651ed0
-md"""## TODO
-* False sharing
-* Atomics
-* Semaphore
-* Design space:
-* Why not just use OS threads?
-    - Faster than the OS shcedular
-    - POtential for inter-task optimisation in the same runtime and other optimisations
-    - Allows us to control scheduling, e.g. giving more frequent time to tasks that must
-      be responsive like a task checking for user input
-* Green threading: Namedrop
-* One stack, more smaller, growable? Or keep multiple tasks on single stack?
+There is also slow, but ongoing work on optimising the scheduler itself, as well as types like `ReentrantLock` and `Channel`.
 """
 
 # ╔═╡ 00000000-0000-0000-0000-000000000001
 PLUTO_PROJECT_TOML_CONTENTS = """
 [deps]
+BenchmarkTools = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
 PlutoUI = "7f904dfe-b85e-4ff6-b463-dae2292396a8"
 
 [compat]
+BenchmarkTools = "~1.6.0"
 PlutoUI = "~0.7.60"
 """
 
@@ -633,7 +1366,7 @@ PLUTO_MANIFEST_TOML_CONTENTS = """
 
 julia_version = "1.11.3"
 manifest_format = "2.0"
-project_hash = "8aa109ae420d50afa1101b40d1430cf3ec96e03e"
+project_hash = "81693cf1c32947d8a969f76f9fb759d6f2b3c002"
 
 [[deps.AbstractPlutoDingetjes]]
 deps = ["Pkg"]
@@ -653,11 +1386,27 @@ version = "1.11.0"
 uuid = "2a0f44e3-6c83-55bd-87e4-b1978d98bd5f"
 version = "1.11.0"
 
+[[deps.BenchmarkTools]]
+deps = ["Compat", "JSON", "Logging", "Printf", "Profile", "Statistics", "UUIDs"]
+git-tree-sha1 = "e38fbc49a620f5d0b660d7f543db1009fe0f8336"
+uuid = "6e4b80f9-dd63-53aa-95a3-0cdb28fa8baf"
+version = "1.6.0"
+
 [[deps.ColorTypes]]
 deps = ["FixedPointNumbers", "Random"]
 git-tree-sha1 = "b10d0b65641d57b8b4d5e234446582de5047050d"
 uuid = "3da002f7-5984-5a60-b8a6-cbb66c0b333f"
 version = "0.11.5"
+
+[[deps.Compat]]
+deps = ["TOML", "UUIDs"]
+git-tree-sha1 = "8ae8d32e09f0dcf42a36b90d4e17f5dd2e4c4215"
+uuid = "34da2185-b29b-5c13-b0c7-acf172513d20"
+version = "4.16.0"
+weakdeps = ["Dates", "LinearAlgebra"]
+
+    [deps.Compat.extensions]
+    CompatLinearAlgebraExt = "LinearAlgebra"
 
 [[deps.CompilerSupportLibraries_jll]]
 deps = ["Artifacts", "Libdl"]
@@ -823,6 +1572,10 @@ deps = ["Unicode"]
 uuid = "de0858da-6303-5e67-8744-51eddeeeb8d7"
 version = "1.11.0"
 
+[[deps.Profile]]
+uuid = "9abbd945-dff8-562f-b5e8-e1ebf5ef1b79"
+version = "1.11.0"
+
 [[deps.Random]]
 deps = ["SHA"]
 uuid = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
@@ -909,30 +1662,95 @@ version = "17.4.0+2"
 """
 
 # ╔═╡ Cell order:
-# ╠═8b83e436-dc12-11ef-1b27-1d3fdefb24c1
+# ╟─8b83e436-dc12-11ef-1b27-1d3fdefb24c1
 # ╠═21b2cbda-17d6-4466-adbc-5e513482e1af
+# ╠═0746182a-2e0e-4bc3-a8e5-459b8a7a6f28
 # ╠═b278c476-74e9-4399-a05c-7c15111bfd3c
-# ╠═17ddbb08-cd8d-446e-b806-dc3000dc2184
+# ╟─17ddbb08-cd8d-446e-b806-dc3000dc2184
 # ╠═8f6cf27f-5648-40ab-b029-d52c0eaf3883
 # ╠═2bd97906-edc8-48e8-ac2d-6a87a2e01fe5
-# ╠═af3b6b92-d1a1-43de-a88b-605f559e1d68
-# ╠═c4f33908-efab-4654-b9dd-b4e46573428a
+# ╟─c4f33908-efab-4654-b9dd-b4e46573428a
 # ╠═5e45c378-3788-484c-906b-86586c8cd7c8
-# ╠═a8acd763-7068-4a2c-9dd9-8f926680f8b7
+# ╟─a8acd763-7068-4a2c-9dd9-8f926680f8b7
 # ╠═de1f77c2-bdbb-4192-ba24-da41489c0a8b
-# ╠═f74b1284-dece-4216-bb06-29514415ff5f
-# ╠═ef36118e-2fdf-4c99-a9da-f8cbc6885fb3
+# ╟─f74b1284-dece-4216-bb06-29514415ff5f
+# ╟─ef36118e-2fdf-4c99-a9da-f8cbc6885fb3
 # ╠═67664ef0-0f00-4388-a47c-9d97d7b443a5
-# ╠═0f800d3f-34ae-4f6c-b6bc-d7c82c1c1af2
-# ╠═20ee5cfa-b80c-4a2f-8314-67048c1c429b
-# ╠═a279c000-2154-44b9-bb72-41862b61fcbc
-# ╠═359fea17-f45f-4705-8f0d-abe7374564c3
-# ╠═1d70bc25-b941-4481-8579-80b70e7b6846
-# ╠═6b900c42-127e-463f-b941-c321297537f3
-# ╠═725773df-24c7-4547-84fc-3cd163d19136
-# ╠═5688d79a-0593-4722-b4f6-252b327746b2
-# ╠═a0ed20e1-da3f-4dbc-83b1-1399f0dea805
-# ╠═a305ee04-498a-4933-a813-8550f50a761d
-# ╠═7c750b87-b513-4a1b-9a4e-b4dea6651ed0
+# ╟─0f800d3f-34ae-4f6c-b6bc-d7c82c1c1af2
+# ╟─20ee5cfa-b80c-4a2f-8314-67048c1c429b
+# ╟─a279c000-2154-44b9-bb72-41862b61fcbc
+# ╠═0668560d-d2ff-49ae-a5ae-3a92ba269e53
+# ╠═a40cd157-fde1-49be-9156-0b8caa12e5a5
+# ╟─fc99d8b6-9b32-46a4-bde0-9108b029e43e
+# ╠═602c3a65-79c2-4e6b-a70d-c9b3c1df20ca
+# ╟─592fc034-8344-4cb7-b378-6ced7205ad9e
+# ╠═a5fa1503-5880-4d0e-aba8-0c3ee34b6dfa
+# ╟─422c8758-e0f6-491e-ad0d-743f4d9e7c48
+# ╠═107291d1-1c00-45a7-9225-be541ff44ab6
+# ╠═4266d974-0dca-4798-9952-2a7e8c77968c
+# ╠═6a1c5924-92b6-40ef-967f-494332ade500
+# ╟─718eac91-b4d1-4dee-ac67-76e4cb8ef341
+# ╠═fde5713b-2774-43dc-90d1-36b1446d4540
+# ╟─19609694-3c8e-4b46-be18-63011e315308
+# ╠═9fe22bc2-2c4a-423d-85cb-60a16ad68ea3
+# ╠═00e9e859-3238-41f8-93ca-b2243495083b
+# ╟─b74ae921-f376-4a40-b042-4e7a777902ef
+# ╠═65fc3a2d-de89-4cc2-8f1e-dbc2f90c416d
+# ╠═a08bd0d6-776e-46a7-a186-614cc0bbd65d
+# ╟─fd87476d-b32b-4785-9fdc-21da66b9adaa
+# ╟─27133bd1-433e-4bc4-ac6e-c06b9c245b6e
+# ╠═e07e174d-3719-4025-91aa-f56365a68453
+# ╠═d11037b5-241d-4878-9602-0043bb21e72b
+# ╠═96d968b3-4662-4985-9a81-7fe6cdcbb524
+# ╟─2a383feb-22d8-48d8-b247-c20ec5bbe91b
+# ╟─606f9ce3-90f2-442c-aac7-d2a24a61f180
+# ╠═69652455-0e9f-4b2a-bbef-464841dc9bc5
+# ╠═175bc3f1-1a25-4d0a-b454-44b34b5efe11
+# ╟─f2f2e703-9874-4872-958b-d653f9a8365a
+# ╟─9d335a94-9b57-4624-a0f0-b54829a951e5
+# ╟─fc8d9128-9788-416f-b387-575c87e73360
+# ╠═62b369f9-15f7-4737-8dda-40211f8f22c0
+# ╟─69b86287-ad33-486a-9b70-b4eacb443f43
+# ╟─1d70bc25-b941-4481-8579-80b70e7b6846
+# ╟─6b900c42-127e-463f-b941-c321297537f3
+# ╟─725773df-24c7-4547-84fc-3cd163d19136
+# ╟─766372a3-fb2c-4e86-8916-37bcaf9c0d79
+# ╟─fc185cbe-37a2-45ba-bb5c-de3441722a70
+# ╠═87a0896d-38a8-4b44-84b9-8d35a284338d
+# ╠═5e644139-6db6-49a9-ab68-7ad8c872d483
+# ╟─49629d75-2824-4938-999f-d02b65cc8c29
+# ╟─5688d79a-0593-4722-b4f6-252b327746b2
+# ╟─545e5844-1624-4f5d-b0bc-fa900cd8562c
+# ╠═9a6d75a0-0f0c-4909-886d-9a2377ef0ee7
+# ╠═05524538-352d-4dff-9f24-5844b46635c8
+# ╠═af561fc4-9b1b-405a-90a6-8bc18e93bf3f
+# ╟─602d6b6d-24b2-4cd8-901d-f893772745fb
+# ╠═354447dc-030a-4ced-a2cf-3fa89865933e
+# ╟─1c5c9cc7-de24-4784-9b0a-649a9a513d63
+# ╠═97220abd-8334-45ca-895f-2e9d76dd77cd
+# ╠═bf2a766b-1d44-485a-a837-f96d549d09fd
+# ╟─ca20d8be-b038-46dc-bc37-898e2482ac09
+# ╠═5cae8006-d72f-4771-8588-ae7bddc6ab6b
+# ╠═3f80113b-669a-44d8-86d6-471c43154958
+# ╠═b3b9c83b-167e-4de7-b824-ef2a754bc91b
+# ╟─b16fee73-48e2-4de3-8a51-bf6684e15e17
+# ╠═0d5d8b7e-5045-4880-b9e3-d86e1ff3af2c
+# ╟─fb968464-b790-4fe0-ba3b-2bd55c159f3f
+# ╠═4aa430d1-3efc-4e88-ab58-4a5448815567
+# ╟─97e2f87b-b7a8-4ab2-b55a-28bbb86309d9
+# ╠═3a30d8db-6730-4f5b-98fd-7aca5bbe8dc8
+# ╠═b20ed863-cdf8-447b-923b-23339ba0e8cc
+# ╟─c8194ce4-f730-48ec-aaf7-9e2f3f9dcef7
+# ╠═a426d78d-f964-4d19-b5fa-7ef0c0d54341
+# ╟─cc343ccf-4648-4121-95ff-29b81bd9cf9b
+# ╟─dbb7b9f6-da94-4bac-b172-c7a4bb31d5c4
+# ╠═59f4a2be-acc3-4aed-b1ef-e5d0dec70f51
+# ╠═a3c5932a-8ff9-4294-9130-9c661ed8dee6
+# ╟─5729484b-0467-403e-88f9-28677f03649d
+# ╟─513c6b05-23ed-4174-802a-2ade2acf2adc
+# ╠═cc56cdff-9d19-46c1-934c-f436439a2980
+# ╟─5c1ac369-15ee-4b36-a7bc-5ff1ba8cd8b1
+# ╟─a6172e40-8288-440f-b684-2268b218c3f3
+# ╟─a305ee04-498a-4933-a813-8550f50a761d
 # ╟─00000000-0000-0000-0000-000000000001
 # ╟─00000000-0000-0000-0000-000000000002
