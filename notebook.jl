@@ -109,7 +109,7 @@ begin
 	function complex_function(x)
 		t = @spawn simple_function_1(x)
 		a = simple_function_2(x)
-		return (fetch(t)::Float64, a)
+		return (fetch(t)::Int, a)
 	end
 
 	complex_function(9)
@@ -129,7 +129,7 @@ For this reason, the above pattern is really only useful in relatively high-leve
 
 # ╔═╡ 20ee5cfa-b80c-4a2f-8314-67048c1c429b
 md"""
-### The law of async
+## The law of async
 Since async is all about splitting your program into stoppable and resumable chunks part of your program, making your code asyncronous can be invasive, in that it can have a large impact on the structure of your entire program.
 Async is also (deservedly) infamous for being tricky and prone to bugs.
 
@@ -164,7 +164,93 @@ In this spirit of legalism, let's write some sections to this law:
 # ╔═╡ a279c000-2154-44b9-bb72-41862b61fcbc
 md"""
 ## Thread safety: Atomic operations
+
+Let's have a look at an example of what happens when you violate the law of async.
+In the code below, two tasks concurrently add to the `counts` variable.
+Both tasks will add the numbers 1 to 1000, one million times.
+Here, I use the `wait` function. It's similar to `fetch`, but doesn't return the result of the task, which I don't need here.
 """
+
+# ╔═╡ e07e174d-3719-4025-91aa-f56365a68453
+function data_race()
+	function increment_counts(counts, numbers)
+		for _ in 1:1_000_000, i in numbers
+			counts[] += i
+		end
+	end
+	counts = Ref(0)
+	numbers = collect(1:1_000)
+	task = @spawn increment_counts(counts, numbers)
+	# Try moving this function call below `wait`
+	increment_counts(counts, numbers)
+	wait(task)
+	return counts[]
+end
+
+# ╔═╡ 1ba080ab-f7eb-4049-9fa6-8935dd66b140
+md"Naively, we would expect the function would return:"
+
+# ╔═╡ 4580625d-f821-4853-a3a3-c741098211c8
+sum(1:1000) * 1_000_000 * 2
+
+# ╔═╡ cb1750fb-b86c-44ac-86ca-7b0919cee74f
+md"However, when we run it, we see it returns much less:"
+
+# ╔═╡ 6d5628a9-ff6e-4cb9-9368-fec1af8f8ff3
+data_race()
+
+# ╔═╡ 5a22a81b-2b33-4782-ae49-bcbe7986291a
+md"""
+Here, we say there has been a _data race_: One task mutates the data, but does not have exclusive access to it.
+
+Specifically, what happens is that both threads read from the ref value once, compute the number to add by summing the array one million times, and then write the read value plus the sum back to the ref.
+Since the threads start at the approximate same time, they both read zero, and write back zero plus their computed sum.
+
+Note that this isn't quite what we asked the computer to do:
+In the `data_race` function, I ask to update `counts` in the inner loop for one billion times total.
+What actually happens is that the compiler has rewritten the function to only do one read and one write to `counts`.
+
+What we've seen here is a specific instance of a general case: The compiler will shuffle around the operations in a function, and execute them in an order which was not necessarily the same as they were defined.
+More insidiously, even if we could get the compiler to behave, modern CPUs are out-of-order, and the precise order they execute instructions cannot be relied on.
+
+The re-ordering done by both the compiler and the CPU will always make sure to never cause any changes in observable behaviour - they will only re-order instructions if the end result will be the same.
+The problem for us is that both the compiler and the CPU simply _assume_ that nothing hinges on the exact timing of each operation, and they also assume that no other thread of execution is reading or writing the data in parallel.
+After all, if compilers and CPUs could not do any changes which affected the timing of any code run, all optimisations would be impossible.
+"""
+
+# ╔═╡ d5c7051d-57bd-46bf-ad71-9e9081c9e293
+md"""
+Atomic operations allow us to solve this issue. An atomic operation is an operation which the CPU does not break down into smaller operations (or, if it does, then that it totally unobservable from any program), so that it will never be possible to observe an atomic operation be "halfway done".
+
+Atomic operations also have an _order_.
+The order places limits on the extend that the compiler and the CPU can reorder instructions around the atomic operation - we will get back to the different kinds of orderings later.
+
+Let's change the `data_race` function from before, but instead of a `Ref`, we use an `Atomic{Int}`.
+Futhermore, where before, we updated using `counts[] += i`, which expands to `counts[] = counts[] + i`, which is a separate read and write instruction, we use a single atomic operation to add the numbers.
+Because the operation is atomic, it is not possible for one thread to read the value and the other thread to mutate the value before the first thread writes back to it:
+"""
+
+# ╔═╡ 6b13af99-e139-4a83-8a66-39911187748a
+function no_data_race()
+	function increment_counts(counts, numbers)
+		for _ in 1:10_000, i in numbers
+			atomic_add!(counts, i)
+		end
+	end
+	counts = Atomic{Int}(0)
+	numbers = collect(1:1_000)
+	task = @spawn increment_counts(counts, numbers)
+	# Try moving this function call below `wait`
+	increment_counts(counts, numbers)
+	wait(task)
+	return counts[]
+end
+
+# ╔═╡ 9fb522aa-7777-438e-bfdb-6a4afeaf4344
+md"We can see that the data race disappears. However, it now runs more than 100x slower, precisely because the compiler and the CPU can no longer optimise the memory access, so I've reduced the number of iterations by a factor of 100."
+
+# ╔═╡ 72f4dddf-0219-4648-ab5c-e5619c3ae537
+no_data_race()
 
 # ╔═╡ 359fea17-f45f-4705-8f0d-abe7374564c3
 # Example of data race
@@ -926,6 +1012,16 @@ version = "17.4.0+2"
 # ╠═0f800d3f-34ae-4f6c-b6bc-d7c82c1c1af2
 # ╠═20ee5cfa-b80c-4a2f-8314-67048c1c429b
 # ╠═a279c000-2154-44b9-bb72-41862b61fcbc
+# ╠═e07e174d-3719-4025-91aa-f56365a68453
+# ╠═1ba080ab-f7eb-4049-9fa6-8935dd66b140
+# ╠═4580625d-f821-4853-a3a3-c741098211c8
+# ╠═cb1750fb-b86c-44ac-86ca-7b0919cee74f
+# ╠═6d5628a9-ff6e-4cb9-9368-fec1af8f8ff3
+# ╠═5a22a81b-2b33-4782-ae49-bcbe7986291a
+# ╠═d5c7051d-57bd-46bf-ad71-9e9081c9e293
+# ╠═6b13af99-e139-4a83-8a66-39911187748a
+# ╠═9fb522aa-7777-438e-bfdb-6a4afeaf4344
+# ╠═72f4dddf-0219-4648-ab5c-e5619c3ae537
 # ╠═359fea17-f45f-4705-8f0d-abe7374564c3
 # ╠═1d70bc25-b941-4481-8579-80b70e7b6846
 # ╠═6b900c42-127e-463f-b941-c321297537f3
