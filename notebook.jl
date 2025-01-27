@@ -166,9 +166,50 @@ md"""
 ## Thread safety: Atomic operations
 
 Let's have a look at an example of what happens when you violate the law of async.
-In the code below, two tasks concurrently add to the `counts` variable.
-Both tasks will add the numbers 1 to 1000, one million times.
-Here, I use the `wait` function. It's similar to `fetch`, but doesn't return the result of the task, which I don't need here.
+
+In the code below, `add_ten_million!` will add ten million to a reference holding an integer, one at a time. The function `increment_occasionally` will check the reference, add its content to a result, and then zero the reference:
+"""
+
+# ╔═╡ 0668560d-d2ff-49ae-a5ae-3a92ba269e53
+function add_ten_million!(ref)
+	for i in 1:10_000_000
+		ref[] += 1
+		# I'll explain what this fence does later
+		Threads.atomic_fence()
+	end
+end;
+
+# ╔═╡ a40cd157-fde1-49be-9156-0b8caa12e5a5
+function increment_occasionally(ref)
+	t = time_ns()
+	result = 0
+	while time_ns() - t < 1_000_000_000
+		result += ref[]
+		ref[] = 0
+		Threads.atomic_fence()
+	end
+	result
+end;
+
+# ╔═╡ fc99d8b6-9b32-46a4-bde0-9108b029e43e
+md"""
+Below, I run the two functions in parallel, where they work on the same ref.
+Clearly, when they are done, the result will be one million... right?
+"""
+
+# ╔═╡ 602c3a65-79c2-4e6b-a70d-c9b3c1df20ca
+let
+	ref = Ref(0)
+	t = @spawn increment_occasionally(ref)
+	add_ten_million!(ref)
+	# Fetch the result and add anything left in `ref`
+	# not yet taken by `increment_occasionally`
+	fetch(t) + ref[]
+end
+
+# ╔═╡ 592fc034-8344-4cb7-b378-6ced7205ad9e
+md"""
+The reason we get a 
 """
 
 # ╔═╡ e07e174d-3719-4025-91aa-f56365a68453
@@ -221,36 +262,89 @@ After all, if compilers and CPUs could not do any changes which affected the tim
 # ╔═╡ d5c7051d-57bd-46bf-ad71-9e9081c9e293
 md"""
 Atomic operations allow us to solve this issue. An atomic operation is an operation which the CPU does not break down into smaller operations (or, if it does, then that it totally unobservable from any program), so that it will never be possible to observe an atomic operation be "halfway done".
+Hence the name _atomic_, meaning "unsplittable".
 
-Atomic operations also have an _order_.
-The order places limits on the extend that the compiler and the CPU can reorder instructions around the atomic operation - we will get back to the different kinds of orderings later.
+This atomicity is required in the function `data_race` on the line `counts[] += i`. This line expands to `counts[] = counts[] + 1`, which first loads the existing value, increments the loaded value, and then stores the incremented value back.
 
-Let's change the `data_race` function from before, but instead of a `Ref`, we use an `Atomic{Int}`.
-Futhermore, where before, we updated using `counts[] += i`, which expands to `counts[] = counts[] + i`, which is a separate read and write instruction, we use a single atomic operation to add the numbers.
-Because the operation is atomic, it is not possible for one thread to read the value and the other thread to mutate the value before the first thread writes back to it:
+Suppose the value of `counts[]` is 5, and two parallel tasks executes this code.
+In that case, it's possible they run in the following order:
+
+1. Task 1 loads `counts[]` and increments it by one, obtaining 6
+2. Task 2 loads `counts[]` and increments it by one, obtaining 6
+3. Task 1 stores 6 back to `counts`
+4. Task 2 stores 6 back to `counts`
+
+In this case, one of the two increments are lost.
+
+To use atomic operations in Julia, we need to use a mutable struct, with the relevant field marked `@atomic`:
+"""
+
+# ╔═╡ 1ed3961b-cbf9-4efb-8452-5e04b07ea08b
+mutable struct AtomicInt
+	@atomic x::Int
+end
+
+# ╔═╡ 125c6a4c-4ff9-4914-91c2-88dcf206a0f3
+md"""
+Atomic field can _only_ be interacted with using atomic operations, which are also handily available using the `@atomic` macro.
+Hence, we can rewrite `data_race` to avoid the data race:
 """
 
 # ╔═╡ 6b13af99-e139-4a83-8a66-39911187748a
 function no_data_race()
 	function increment_counts(counts, numbers)
 		for _ in 1:10_000, i in numbers
-			atomic_add!(counts, i)
+			@atomic counts.x += i # NB: Change
 		end
 	end
-	counts = Atomic{Int}(0)
+	counts = AtomicInt(0) # NB: Change
 	numbers = collect(1:1_000)
 	task = @spawn increment_counts(counts, numbers)
-	# Try moving this function call below `wait`
 	increment_counts(counts, numbers)
 	wait(task)
-	return counts[]
-end
-
-# ╔═╡ 9fb522aa-7777-438e-bfdb-6a4afeaf4344
-md"We can see that the data race disappears. However, it now runs more than 100x slower, precisely because the compiler and the CPU can no longer optimise the memory access, so I've reduced the number of iterations by a factor of 100."
+	return @atomic counts.x # NB: Change
+end;
 
 # ╔═╡ 72f4dddf-0219-4648-ab5c-e5619c3ae537
 no_data_race()
+
+# ╔═╡ efa94902-632b-4ae0-aea2-3ab0da17cb9f
+md"""
+Before the `@atomic` macro was introduced in Julia, the same result could also be achieved with the `Threads.Atomic` type and the function `Threads.atomic_add!`.
+
+In the examples in this notebook, I'll stick to using the newer, more readable `@atomic` macro.
+"""
+
+# ╔═╡ 88b27485-fe10-4a4e-a2c9-9edb1c61c31c
+md"""
+### Atomic memory orderings
+As mentioned before, atomics have two important features: They cannot be broken down into smaller operations (hence their name), and they limit how the compiler and CPU can re-order memory.
+
+Let's take a look at the different memory orderings.
+
+#### Sequentially consistent
+The most strict ordering is called _sequentially consistent_.
+It means that no operation that appears in the code before the operation may be moved to after the operation, and likewise, no operation may be from after the operation to before.
+
+In Julia, the 
+"""
+
+# ╔═╡ c88406e9-a40b-42e3-b6e9-59ae6a598c89
+md"""
+
+
+
+Atomic operations also have an _order_.
+The order places limits on the extend that the compiler and the CPU can reorder instructions around the atomic operation - we will get back to the different kinds of orderings later.
+
+In Julia, 
+
+Let's change the `data_race` function from before, but instead of a `Ref`, we use an `Atomic{Int}`.
+Futhermore, where before, we updated using `counts[] += i`, which expands to `counts[] = counts[] + i`, which is a separate read and write instruction, we use a single atomic operation to add the numbers.
+Because the operation is atomic, it is not possible for one thread to read the value and t"""
+
+# ╔═╡ 9fb522aa-7777-438e-bfdb-6a4afeaf4344
+md"We can see that the data race disappears. However, it now runs more than 100x slower, precisely because the compiler and the CPU can no longer optimise the memory access, so I've reduced the number of iterations by a factor of 100."
 
 # ╔═╡ 359fea17-f45f-4705-8f0d-abe7374564c3
 # Example of data race
@@ -1012,6 +1106,11 @@ version = "17.4.0+2"
 # ╠═0f800d3f-34ae-4f6c-b6bc-d7c82c1c1af2
 # ╠═20ee5cfa-b80c-4a2f-8314-67048c1c429b
 # ╠═a279c000-2154-44b9-bb72-41862b61fcbc
+# ╠═0668560d-d2ff-49ae-a5ae-3a92ba269e53
+# ╠═a40cd157-fde1-49be-9156-0b8caa12e5a5
+# ╠═fc99d8b6-9b32-46a4-bde0-9108b029e43e
+# ╠═602c3a65-79c2-4e6b-a70d-c9b3c1df20ca
+# ╠═592fc034-8344-4cb7-b378-6ced7205ad9e
 # ╠═e07e174d-3719-4025-91aa-f56365a68453
 # ╠═1ba080ab-f7eb-4049-9fa6-8935dd66b140
 # ╠═4580625d-f821-4853-a3a3-c741098211c8
@@ -1019,9 +1118,14 @@ version = "17.4.0+2"
 # ╠═6d5628a9-ff6e-4cb9-9368-fec1af8f8ff3
 # ╠═5a22a81b-2b33-4782-ae49-bcbe7986291a
 # ╠═d5c7051d-57bd-46bf-ad71-9e9081c9e293
+# ╠═1ed3961b-cbf9-4efb-8452-5e04b07ea08b
+# ╠═125c6a4c-4ff9-4914-91c2-88dcf206a0f3
 # ╠═6b13af99-e139-4a83-8a66-39911187748a
-# ╠═9fb522aa-7777-438e-bfdb-6a4afeaf4344
 # ╠═72f4dddf-0219-4648-ab5c-e5619c3ae537
+# ╠═efa94902-632b-4ae0-aea2-3ab0da17cb9f
+# ╠═88b27485-fe10-4a4e-a2c9-9edb1c61c31c
+# ╠═c88406e9-a40b-42e3-b6e9-59ae6a598c89
+# ╠═9fb522aa-7777-438e-bfdb-6a4afeaf4344
 # ╠═359fea17-f45f-4705-8f0d-abe7374564c3
 # ╠═1d70bc25-b941-4481-8579-80b70e7b6846
 # ╠═6b900c42-127e-463f-b941-c321297537f3
