@@ -163,11 +163,15 @@ In this spirit of legalism, let's write some sections to this law:
 
 # ╔═╡ a279c000-2154-44b9-bb72-41862b61fcbc
 md"""
-## Thread safety: Atomic operations
+## Data races
 
 Let's have a look at an example of what happens when you violate the law of async.
 
-In the code below, `add_ten_million!` will add ten million to a reference holding an integer, one at a time. The function `increment_occasionally` will check the reference, add its content to a result, and then zero the reference:
+In the code below, `add_ten_million!` will add ten million to a reference holding an integer, one at a time. The function `increment_occasionally` will check the reference, add its content to a result, and then zero the reference.
+You can envision this as modelling a 'producer' task and a 'consumer' task.
+
+The code contains a function call to `Threads.atomic_fence`.
+You can ignore this for now - I'll get back to it later.
 """
 
 # ╔═╡ 0668560d-d2ff-49ae-a5ae-3a92ba269e53
@@ -194,7 +198,7 @@ end;
 # ╔═╡ fc99d8b6-9b32-46a4-bde0-9108b029e43e
 md"""
 Below, I run the two functions in parallel, where they work on the same ref.
-Clearly, when they are done, the result will be one million... right?
+Clearly, when they are done, the result will be ten million... right?
 """
 
 # ╔═╡ 602c3a65-79c2-4e6b-a70d-c9b3c1df20ca
@@ -209,158 +213,305 @@ end
 
 # ╔═╡ 592fc034-8344-4cb7-b378-6ced7205ad9e
 md"""
-The reason we get a 
-"""
+The result is _undeterministic_ - every time you run it, it's likely to give a different number.
 
-# ╔═╡ e07e174d-3719-4025-91aa-f56365a68453
-function data_race()
-	function increment_counts(counts, numbers)
-		for _ in 1:1_000_000, i in numbers
-			counts[] += i
-		end
-	end
-	counts = Ref(0)
-	numbers = collect(1:1_000)
-	task = @spawn increment_counts(counts, numbers)
-	# Try moving this function call below `wait`
-	increment_counts(counts, numbers)
-	wait(task)
-	return counts[]
-end
+The reason it doesn't behave as expected is that both tasks mutate `ref` concurrently, violating the law of async.
+We call such situation _data races_.
 
-# ╔═╡ 1ba080ab-f7eb-4049-9fa6-8935dd66b140
-md"Naively, we would expect the function would return:"
+In this particular example, the problem occurs because of the details of how the line `ref[] += 1` is implemented.
+In Julia, `ref[] += 1` is equivalent to `ref[] = ref[] + 1` - actually three operations in disguise, it's actually three operations:
 
-# ╔═╡ 4580625d-f821-4853-a3a3-c741098211c8
-sum(1:1000) * 1_000_000 * 2
+1. Load `ref[]`
+2. Add 1 to the loaded value
+3. Store the result back into `ref[]`.
 
-# ╔═╡ cb1750fb-b86c-44ac-86ca-7b0919cee74f
-md"However, when we run it, we see it returns much less:"
+Suppose now `ref` has a value of 5, and task A runs `add_ten_million` thus incrementing `ref`, and task B runs `increment_occassionally` and thus zeros `ref`.
+There is is some chance that it could be executed in the following order:
 
-# ╔═╡ 6d5628a9-ff6e-4cb9-9368-fec1af8f8ff3
-data_race()
+1. Task A loads `ref[]` getting 5
+2. Task B computes `result += ref[]`
+3. Task A adds one to the loaded value of 5
+4. Task B zeros `ref`
+5. Task A sets `ref` to 6
 
-# ╔═╡ 5a22a81b-2b33-4782-ae49-bcbe7986291a
-md"""
-Here, we say there has been a _data race_: One task mutates the data, but does not have exclusive access to it.
+If that occurs, `ref` is not zeroed like it's supposed to, and therefore the 5 previous increments will be added twice to `result`.
 
-Specifically, what happens is that both threads read from the ref value once, compute the number to add by summing the array one million times, and then write the read value plus the sum back to the ref.
-Since the threads start at the approximate same time, they both read zero, and write back zero plus their computed sum.
+Here, the underlying cause is that `ref[] += 1` is composed of several steps, and that the other task is able to read or modify a value that is in middle of these steps.
 
-Note that this isn't quite what we asked the computer to do:
-In the `data_race` function, I ask to update `counts` in the inner loop for one billion times total.
-What actually happens is that the compiler has rewritten the function to only do one read and one write to `counts`.
+In computer science terms, we say that the problem is that `ref[] += 1` is _not atomic_. Here, "atomic" is used in the original Greek sense, meaning _indivisible_.
+An atomic operation is one that can never be observed is a state of partial completion - it either has not happened yet, or is already complete.
 
-What we've seen here is a specific instance of a general case: The compiler will shuffle around the operations in a function, and execute them in an order which was not necessarily the same as they were defined.
-More insidiously, even if we could get the compiler to behave, modern CPUs are out-of-order, and the precise order they execute instructions cannot be relied on.
+### Even single CPU instructions are not atomic
+It is tempting to try to solve data races like the one above by simply choosing operations which are not implemented in terms of multiple operations.
+If you look into the generated code for the `add_ten_million!` function above, you will see that the line `ref[] += 1` is compiled to a single instruction - at least on my computer with a x86-64 CPU.
+So naively, one would think that this single instruction would be atomic - not composed of multiple, smaller steps. Nonetheless, the data race happened. Why?
 
-The re-ordering done by both the compiler and the CPU will always make sure to never cause any changes in observable behaviour - they will only re-order instructions if the end result will be the same.
-The problem for us is that both the compiler and the CPU simply _assume_ that nothing hinges on the exact timing of each operation, and they also assume that no other thread of execution is reading or writing the data in parallel.
-After all, if compilers and CPUs could not do any changes which affected the timing of any code run, all optimisations would be impossible.
-"""
+In the CPU, single CPU instructions may be executed in terms of smaller micro-operations, the details of which is an implementation detail of the CPU. Further, the CPU's memory system is complex and multi-layered, and there is no guarantee that when a computer stores a value to memory, other parts of the CPU will immediately be able to see the stored value.
+Finally, on the programming language level, while Julia might implement the increment as a single instruction right now, Julia provides no guarantee that the compiler will generate the same code in the future.
 
-# ╔═╡ d5c7051d-57bd-46bf-ad71-9e9081c9e293
-md"""
-Atomic operations allow us to solve this issue. An atomic operation is an operation which the CPU does not break down into smaller operations (or, if it does, then that it totally unobservable from any program), so that it will never be possible to observe an atomic operation be "halfway done".
-Hence the name _atomic_, meaning "unsplittable".
+This will be a recurring theme in this notebook: The rules of async are abstractions that can't easily be explained in terms of the underlying implementation, because the implementation is complex and opaque.
+As a programmer, your best bet is to adhere to the abstraction and not try to outsmart it by peeking under the hood. 
 
-This atomicity is required in the function `data_race` on the line `counts[] += i`. This line expands to `counts[] = counts[] + 1`, which first loads the existing value, increments the loaded value, and then stores the incremented value back.
+Once we know that
+1. All CPU operations may be split into multiple steps in the CPU and the memory hierarchy, and
+2. Interacting with data that is in a partially processed state may cause a data race,
 
-Suppose the value of `counts[]` is 5, and two parallel tasks executes this code.
-In that case, it's possible they run in the following order:
+we find ourselves forced to conclude that two different tasks can never interact with the same data at all, and so the prospect of writing ayncronous code appear completely hopeless.
 
-1. Task 1 loads `counts[]` and increments it by one, obtaining 6
-2. Task 2 loads `counts[]` and increments it by one, obtaining 6
-3. Task 1 stores 6 back to `counts`
-4. Task 2 stores 6 back to `counts`
+Fortunately, Julia provides dedicated _atomic operations_ to address this problem. The language guarantees that these operations are always compiled down to dedicated atomic CPU instructions, which the CPU in turn guarantees the atomicity of.
 
-In this case, one of the two increments are lost.
-
+Let's try to solve the bug using atomic operations.
 To use atomic operations in Julia, we need to use a mutable struct, with the relevant field marked `@atomic`:
 """
 
-# ╔═╡ 1ed3961b-cbf9-4efb-8452-5e04b07ea08b
+# ╔═╡ a5fa1503-5880-4d0e-aba8-0c3ee34b6dfa
 mutable struct AtomicInt
 	@atomic x::Int
 end
 
-# ╔═╡ 125c6a4c-4ff9-4914-91c2-88dcf206a0f3
+# ╔═╡ 422c8758-e0f6-491e-ad0d-743f4d9e7c48
 md"""
-Atomic field can _only_ be interacted with using atomic operations, which are also handily available using the `@atomic` macro.
-Hence, we can rewrite `data_race` to avoid the data race:
+We can now rewrite the functions above, using this atomic integer instead of a normal `Ref`.
+Note that all operations on atomic fields needs to be marked `@atomic`.
 """
 
-# ╔═╡ 6b13af99-e139-4a83-8a66-39911187748a
-function no_data_race()
-	function increment_counts(counts, numbers)
-		for _ in 1:10_000, i in numbers
-			@atomic counts.x += i # NB: Change
-		end
+# ╔═╡ 107291d1-1c00-45a7-9225-be541ff44ab6
+function add_ten_million_atomic!(atomic)
+	for i in 1:10_000_000
+		@atomic atomic.x += 1
 	end
-	counts = AtomicInt(0) # NB: Change
-	numbers = collect(1:1_000)
-	task = @spawn increment_counts(counts, numbers)
-	increment_counts(counts, numbers)
-	wait(task)
-	return @atomic counts.x # NB: Change
 end;
 
-# ╔═╡ 72f4dddf-0219-4648-ab5c-e5619c3ae537
-no_data_race()
+# ╔═╡ 4266d974-0dca-4798-9952-2a7e8c77968c
+function increment_occasionally_atomic(atomic)
+	t = time_ns()
+	result = 0
+	while time_ns() - t < 1_000_000_000
+		# Atomic swap does a load and a store in a single atomic
+		# operation, here it swaps the atomic.x field with 0.
+		result += (@atomicswap atomic.x = 0)
+	end
+	result
+end;
 
-# ╔═╡ efa94902-632b-4ae0-aea2-3ab0da17cb9f
+# ╔═╡ 6a1c5924-92b6-40ef-967f-494332ade500
+let
+	atomic = AtomicInt(0)
+	t = @spawn increment_occasionally_atomic(atomic)
+	add_ten_million_atomic!(atomic)
+	fetch(t) + @atomic atomic.x
+end
+
+# ╔═╡ 718eac91-b4d1-4dee-ac67-76e4cb8ef341
 md"""
-Before the `@atomic` macro was introduced in Julia, the same result could also be achieved with the `Threads.Atomic` type and the function `Threads.atomic_add!`.
+Voila! The bug disappeared.
 
-In the examples in this notebook, I'll stick to using the newer, more readable `@atomic` macro.
+## Memory re-ording
+Atomic operations have a _memory ordering_ associated with them.
+To understand memory ordering, it is necessary to take a detour into how Julia's compiler is able to re-order memory operations in general.
+
+### Re-ordering in single threaded code
+If we consider a simple Julia function like the one below:
 """
 
-# ╔═╡ 88b27485-fe10-4a4e-a2c9-9edb1c61c31c
+# ╔═╡ fde5713b-2774-43dc-90d1-36b1446d4540
+function order1()
+	b = 1 + 1
+	a = 1
+	a = 2
+	return a + b
+end;
+
+# ╔═╡ 19609694-3c8e-4b46-be18-63011e315308
 md"""
+As we know and love, the Julia compiler will change the code being optimised, in order to make it run faster.
+For example, it may move the computation of `b = 1 + 1` down onto the last line, such that it becomes `return a + 2`.
+In general, the compiler is free to move computations around, such that they are run in a different order from what they were defined in.
+
+
+Similarly, it may delete the `a = 1` like, since `a` will be overwritten immediately after, anyway.
+But wait: If the compiler is able to move computation around, why can't it reorder `a = 2` to come before `a = 1`, and then delete the `a = 2` line instead?
+
+The obvious answer is that the compiler must have a notion of _dependency_: Computing `b` has no dependency on the computation of `a`, and so may be moved around freely with respect to `a`. 
+In contast, dependent operations must have a notion of _happens before_, i.e. `a = 1` happens before `a = 2`, so these two lines can't just be rearranged.
+
+The compiler's concept of happens-before relies on the concept of a data dependency.
+Some data (i.e. a variable or a memory location) `A` depends on data `B` if `B` is being used to mutate `A`.
+
+Once again, I want to stress that _happens before_ is an __abstraction__.
+In practise, `order1` will compile down to simply `return 4`, and when the program runs, there won't exist any data that corresponds to the variables `a` or `b`.
+Nonetheless, we can still unambiguously say that `a = 1` happens before `a = 2`.
+
+As we've seen before, if memory is being mutated, it can _only_ be shared between tasks if the mutation is atomic, since sharing non-atomically mutated memory may cause a data race.
+For this reason, barring atomic operations, data in different tasks cannot have a valid data dependency of each other, and as a consequence, only atomic operations can establish a happens-before relationship between two tasks.
+
+### Happens-before relationships between tasks
+Let's look at the happens-before relationships in the code below and consider what that implies for the result
+"""
+
+# ╔═╡ 9fe22bc2-2c4a-423d-85cb-60a16ad68ea3
+function overwrite(a::Ref{Bool}, b::Ref{Bool})
+	a[] = true
+	b[] = a[]
+end;
+
+# ╔═╡ 00e9e859-3238-41f8-93ca-b2243495083b
+function observe_overwrite()
+	a = Ref(false)
+	b = Ref(false)
+	t = @spawn overwrite(a, b)
+	b[] ? a[] : true
+end;
+
+# ╔═╡ b74ae921-f376-4a40-b042-4e7a777902ef
+md"""
+Here, `observe_overwrite()` may return both `false` and `true`.
+
+This may be surprising. After all, `b[]` is guaranteed to happen after `a[]`, since `b` depends on `a`.
+Therefore, in `observe_overwrite`, if `b[]`, then `a[] = true` must have already happened, and therefore, `a[]` necessarily must return `true`.
+
+Right?
+
+Not so. What we missed with the above analysis is that, absent atomic operations, there is no notion of happens-before between tasks. So, the function `observe_overwrite` could observe the operations in `overwrite` in any order.
+Remarkably, this includes the order where `b` stores `true` __before__ `a` does, despite `b` supposedly loading its value from `a`!
+Therefore, `observe_overwrite` could plausibly load `true` from `b[]`, and then return a `false` from `a[]`!
+
+We can construct even more cursed situations where the lack of happens-before between tasks mean that one task will implicitly observe another task doing its operation in an absurd and seemingly impossible order.
+However, the conclusion will be the same: Use atomics when sharing data between tasks, or else you'll get bugs.
+
 ### Atomic memory orderings
-As mentioned before, atomics have two important features: They cannot be broken down into smaller operations (hence their name), and they limit how the compiler and CPU can re-order memory.
+It's important to keep in mind _why_ our compiler, CPU and memory re-order operations and make all this so hard to reason about: Speed.
+Computers could be built perfectly syncronously with no out-of-order execution, but they would run tens, or hundreds of times slower.
+The more we restrict out-of-order computation using atomics, the slower our program runs.
+Ideally, we want to place only the exact amount of re-ordering restrictions to allow our async code to be correct, but no more.
 
-Let's take a look at the different memory orderings.
+Therefore, atomic operations come with a selection of _memory orderings_, such that we can pick the most lax ordering that still makes our program work.
 
-#### Sequentially consistent
-The most strict ordering is called _sequentially consistent_.
-It means that no operation that appears in the code before the operation may be moved to after the operation, and likewise, no operation may be from after the operation to before.
+#### Ordering: Sequentially consistent
+The default memory ordering, used if not explicitly specified, is also the strongest one: _sequentially consistent ordering_.
+When one task observes the result of a sequentially consistent operation, it is guaranteed to be able to observe all previous reads and writes of that task, and to not yet be able to see all future reads and writes.
+In this way, it acts like a memory barrier: No operations can be re-ordered across the barrier, either in the before => after direction, nor in the after => before direction, no matter what thread you are observing from.
 
-In Julia, the 
+We can fix the above example with a sequentially consistent operation:
+If the observer task atomically reads `b.x` as `true`, the atomic operation `b.x = a[]` is fully completed, in which case `a[] = true` is guaranteed to have been completed due to the memory ordering guarantee of sequentially consistent.
 """
 
-# ╔═╡ c88406e9-a40b-42e3-b6e9-59ae6a598c89
+# ╔═╡ fd87476d-b32b-4785-9fdc-21da66b9adaa
 md"""
+#### Ordering: Monotonic (or relaxed)
+At the opposite end from sequentially consistent ordering, we have the _monotonic_ ordering, also called _relaxed_ ordering in other languages.
+This ordering provide _no restrictions_ on memory re-ordering, allowing the computer full freedom to re-order operations around for maximal performance.
 
+Consider the example in `add_ten_million_atomic!`.
+Here, we don't really care if the compiler moves around the atomic loads or stores, e.g. by unrolling the loop, or even by the compiler moving the atomic increments outside the loop, and switching the ten million atomic increments to a single atomic addition by ten million.
 
+For this reason, that example would have been best solved by using monotonic operations.
+"""
 
-Atomic operations also have an _order_.
-The order places limits on the extend that the compiler and the CPU can reorder instructions around the atomic operation - we will get back to the different kinds of orderings later.
+# ╔═╡ 27133bd1-433e-4bc4-ac6e-c06b9c245b6e
+md"""
+#### Ordering: Acquire and release
+It turns out, that, most of the time when we _do_ care about memory ordering, we don't require the kind of complete memory barrier that the sequentially consistent ordering provide.
 
-In Julia, 
+One of the most common scenarios in async programming is when one task computes value, then atomically modifies some flag to signal the value is ready.
+Meanwhile, another task reads the flag, waiting for it to be changed before the task loads the value and continues processing it.
 
-Let's change the `data_race` function from before, but instead of a `Ref`, we use an `Atomic{Int}`.
-Futhermore, where before, we updated using `counts[] += i`, which expands to `counts[] = counts[] + i`, which is a separate read and write instruction, we use a single atomic operation to add the numbers.
-Because the operation is atomic, it is not possible for one thread to read the value and t"""
+An example could look like this:
+"""
 
-# ╔═╡ 9fb522aa-7777-438e-bfdb-6a4afeaf4344
-md"We can see that the data race disappears. However, it now runs more than 100x slower, precisely because the compiler and the CPU can no longer optimise the memory access, so I've reduced the number of iterations by a factor of 100."
+# ╔═╡ 58b98795-03ad-44e7-ab68-cc5e4e397108
+mutable struct AtomicBool
+	@atomic x::Bool
+end
 
-# ╔═╡ 359fea17-f45f-4705-8f0d-abe7374564c3
-# Example of data race
-# Atomics to solve this
-# What problem does atomics really solve? Dig into the orderings etc (essentially copy that blog post)
-# Atomics can be used to sync tasks, but they are often too low-level to be practically useful. For example, how do you coordinate several tasks from different libraries running on a fixed threadpool? Using atomics, we have better abstractions. To understand how these work, let's take a detour into how async works under the hood.
+# ╔═╡ 65fc3a2d-de89-4cc2-8f1e-dbc2f90c416d
+function overwrite_atomic(a::Ref{Bool}, b::AtomicBool)
+	a[] = true
+	# Sequentially consistent ordering is default,
+	# so we could have omitted it here.
+	@atomic :sequentially_consistent b.x = a[]
+end;
+
+# ╔═╡ a08bd0d6-776e-46a7-a186-614cc0bbd65d
+function observe_overwrite_atomic()
+	a = Ref(false)
+	b = AtomicBool(false)
+	t = @spawn overwrite(a, b)
+	(@atomic :sequentially_consistent b.x) ? a[] : true
+end;
+
+# ╔═╡ e07e174d-3719-4025-91aa-f56365a68453
+function mark_when_ready(is_ready, shared)
+	sleep(0.2) # do some computation
+	shared[] = 42
+	@atomic :release is_ready.x = true
+end;
+
+# ╔═╡ d11037b5-241d-4878-9602-0043bb21e72b
+function return_when_ready(is_ready, shared)
+	while !(@atomic :acquire is_ready.x)
+		# Only check once ever 10 miliseconds
+		sleep(0.01)
+	end
+	shared[]
+end;
+
+# ╔═╡ 96d968b3-4662-4985-9a81-7fe6cdcbb524
+let
+	is_ready = AtomicBool(false)
+	shared = Ref(0)
+	t = @spawn return_when_ready(is_ready, shared)
+	sleep(0.1)
+	mark_when_ready(is_ready, shared)
+	wait(t)
+	shared[]
+end
+
+# ╔═╡ 2a383feb-22d8-48d8-b247-c20ec5bbe91b
+md"""
+Here, in `mark_when_ready`, it's crucial that no operations are moved from in the before => after direction across the atomic modification of `is_ready`.
+For example, if `shared[] = 42` was moved to after the atomic operation, then the other task might use `shared` before it was ready.
+
+But the opposite isn't true! It would be no problem if the compiler moved some non-atomic operations in the after => before direction across the atomic operation.
+
+In `return_when_ready`, it's the opposite situation: `shared[]` cannot move in the after => before direction, but it would not be a problem if there was some operation above the atomic load that was moved to after.
+
+Ad demonstrated in the example, this is what the _acquire_ and _release_ orderings are used for: The release ordering is used for a write operation to release some data to another task, and the acquire ordering is used for a read operation to access data modified in another task.
+
+#### Ordering: Acquire-release
+There exists certain atomic operation which do both a read and a write at once. For example, the function `Threads.atomic_cas!` is equivalent to this function
+
+```julia
+function cas!(x::Threads.Atomic, cmp, newval)
+    old = x.x    
+	if x.x == cmp
+		x.x = newval
+	end
+	old
+end
+```
+
+, but done in one single atomic operation.  Here, the read part of the function has acquire memory ordering, and the write part had release ordering.
+
+I still don't understand the difference between acquire-release and sequentially consistent ordering.
+
+### Atomics are mostly used to implement other async abstractions
+The abstraction of atomic operations are the lowest level async abstraction provided by the CPU itself, and, through the compiler, the programming language.
+
+Not only are they extremely low level in that they are essentially async-friendly single CPU operations, their memory ordering and the happens-before relationship is also difficult to reason about.
+
+Direct use of atomics can also be extremely _inefficient_.
+For example, the `return_when_ready` function implemented above will continuously check whether the shared value is ready, consuming CPU cycles in the process.
+It would be much better if the function instead could be paused and only resumed once the value was ready.
+
+In practice, most use cases of async don't directly use atomics, but will instead control tasks through  more user-friendly higher level abstractions implemented in terms of atomic operations.
+
+Before we turn to those abstractions, let's look at what makes up a task itself.
+"""
 
 # ╔═╡ 1d70bc25-b941-4481-8579-80b70e7b6846
 md"""
-## Julia async under the hood
-As you might have garnered from the brief description above, Julia's system of async is quite high level,
-with the language abstracting away most of the details of how exactly each task is run on the different threads, allowing the programmer to get stuff done with little ceremony.
-
-Let's peel these layers of abstraction back, and look deeper into it.
-
-### What is a task, really?
+## Tasks and task switching
 In order to be suspended and resumed, a task needs to keep track of its current
 progress. The progress of a task, or its state, is defined to two things:
 
@@ -781,6 +932,9 @@ Many of the important moving parts has not been thoroughly optimised.
 In particular, the core devs have long talked about making the `Task` objects
 faster and more memory efficent to create.
 The scheduler itself could also be optimised, and so could locks.
+
+## TODO:
+Some things like IO and sleep callback can only run on thread 1. So if that doesn't yield and can't yield, your system may freeze.
 """
 
 # ╔═╡ 7c750b87-b513-4a1b-9a4e-b4dea6651ed0
@@ -1111,22 +1265,26 @@ version = "17.4.0+2"
 # ╠═fc99d8b6-9b32-46a4-bde0-9108b029e43e
 # ╠═602c3a65-79c2-4e6b-a70d-c9b3c1df20ca
 # ╠═592fc034-8344-4cb7-b378-6ced7205ad9e
+# ╠═a5fa1503-5880-4d0e-aba8-0c3ee34b6dfa
+# ╠═422c8758-e0f6-491e-ad0d-743f4d9e7c48
+# ╠═107291d1-1c00-45a7-9225-be541ff44ab6
+# ╠═4266d974-0dca-4798-9952-2a7e8c77968c
+# ╠═6a1c5924-92b6-40ef-967f-494332ade500
+# ╠═718eac91-b4d1-4dee-ac67-76e4cb8ef341
+# ╠═fde5713b-2774-43dc-90d1-36b1446d4540
+# ╠═19609694-3c8e-4b46-be18-63011e315308
+# ╠═9fe22bc2-2c4a-423d-85cb-60a16ad68ea3
+# ╠═00e9e859-3238-41f8-93ca-b2243495083b
+# ╠═b74ae921-f376-4a40-b042-4e7a777902ef
+# ╠═65fc3a2d-de89-4cc2-8f1e-dbc2f90c416d
+# ╠═a08bd0d6-776e-46a7-a186-614cc0bbd65d
+# ╠═fd87476d-b32b-4785-9fdc-21da66b9adaa
+# ╠═27133bd1-433e-4bc4-ac6e-c06b9c245b6e
+# ╠═58b98795-03ad-44e7-ab68-cc5e4e397108
 # ╠═e07e174d-3719-4025-91aa-f56365a68453
-# ╠═1ba080ab-f7eb-4049-9fa6-8935dd66b140
-# ╠═4580625d-f821-4853-a3a3-c741098211c8
-# ╠═cb1750fb-b86c-44ac-86ca-7b0919cee74f
-# ╠═6d5628a9-ff6e-4cb9-9368-fec1af8f8ff3
-# ╠═5a22a81b-2b33-4782-ae49-bcbe7986291a
-# ╠═d5c7051d-57bd-46bf-ad71-9e9081c9e293
-# ╠═1ed3961b-cbf9-4efb-8452-5e04b07ea08b
-# ╠═125c6a4c-4ff9-4914-91c2-88dcf206a0f3
-# ╠═6b13af99-e139-4a83-8a66-39911187748a
-# ╠═72f4dddf-0219-4648-ab5c-e5619c3ae537
-# ╠═efa94902-632b-4ae0-aea2-3ab0da17cb9f
-# ╠═88b27485-fe10-4a4e-a2c9-9edb1c61c31c
-# ╠═c88406e9-a40b-42e3-b6e9-59ae6a598c89
-# ╠═9fb522aa-7777-438e-bfdb-6a4afeaf4344
-# ╠═359fea17-f45f-4705-8f0d-abe7374564c3
+# ╠═d11037b5-241d-4878-9602-0043bb21e72b
+# ╠═96d968b3-4662-4985-9a81-7fe6cdcbb524
+# ╠═2a383feb-22d8-48d8-b247-c20ec5bbe91b
 # ╠═1d70bc25-b941-4481-8579-80b70e7b6846
 # ╠═6b900c42-127e-463f-b941-c321297537f3
 # ╠═725773df-24c7-4547-84fc-3cd163d19136
