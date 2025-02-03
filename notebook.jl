@@ -493,7 +493,11 @@ end
 
 , but done in one single atomic operation.  Here, the read part of the function has acquire memory ordering, and the write part had release ordering.
 
-I still don't understand the difference between acquire-release and sequentially consistent ordering.
+So, if acquire-release places both a before => after memory barrier and an after => before, what is then the difference from sequntially consistent?
+
+Honestly, I still don't understand. Apparently, only sequentially consistent operations are guaranteed to be part of a global, total modification order - whatever that means.
+
+## TODO: Atomicreplace and atomicswap
 
 ### Atomics are mostly used to implement other async abstractions
 The abstraction of atomic operations are the lowest level async abstraction provided by the CPU itself, and, through the compiler, the programming language.
@@ -549,7 +553,7 @@ Conceptually and implementation wise, there are several similarities between
 a _function call_ and a _task switch_.
 At a function call, the CPU will pause the execution of the current function and
 give control to a different piece of code, which is then automatically returned to
-when the function returns. The similarities to task switching are obvious.
+when the function returns. The parallels to task switching are obvious.
 
 So: How do function calls work?
 
@@ -577,7 +581,7 @@ register on the stack, in order to restore the CPU state.
 
 So, to call a function, the CPU needs to:
 1. Store all local state in either the seven callee-saved registers or on the stack,
-2. Push the rip register to the stack
+2. Push the rip register to the stack, to save the exact location where the call happened, such that the code can jump back to the location upon function return
 3. Move the memory location of the callee into the rip register
 
 The `call` assembly instruction will do the last two points.
@@ -593,7 +597,8 @@ this is what needs to happen:
 
 The `ret` instruction will pop the last element of the stack into the rip register.
 
-Task switching then, is quite similar to function calling: When a task gives control,
+We can use the same general approach when switching tasks:
+When a task gives away control to another task,
 it pushes its callee-saved registers and the rip register to the stack.
 To resume control of a task, all it needs is a pointer to its stack, from which
 it will pop offs its register state and then resume execution by popping off the
@@ -609,7 +614,7 @@ of user code - to be aware of which other tasks are awaiting to be switched to,
 and also to know when to switch to them. How could a library developer possibly
 know what other code is running in a given session that should be switched to?
 
-Instead, a program called the scheduler keeps track of all tasks in the process.
+Instead, a program called the _scheduler_ keeps track of all tasks in the process.
 The scheduler is a C program part of the Julia runtime, similar to the garbage
 collecter.
 Having a single centralized program to control task switches makes things much
@@ -619,19 +624,33 @@ If the Julia process has multiple threads, the scheduler may run multiple tasks
 simultaneously.
 
 User code may switch to the scheduler explicitly with the `yield` function.
-More commonly, any _blocking operation_ automatically switch to the scheduler.
-A blocking operation is an operation that needs to wait for something.
-We've already seen some blocking operations: The channel operations `put!` and
-`take!` block if they aren't able to push or pop elements immediately.
-So do fetching a task (if the task hasn't finished), and locking a lock (if it's
-already locked).
-In Julia, I/O operations that interact with resources provided by the operating
-system, like stdout, stderr, or files, also yield control to the Julia scheduler,
-since they require waiting for the operating system to provide the resource.
+More commonly, yields are built into a number function calls in Julia:
+* Memory allocation, including during dynamic dispatch will occassionaly yield
+* Interaction with outside sources, like IO will usually yield
+* Most explicit task operations, and operations on multi-threading abstractions
 
-The rationale of blocking operations is that, if a task needs to wait for e.g.
-the filesystem or a lock, then the scheduler might as well switch to another task
-that is maybe able to do work.
+### Cooperative multitasking and interrupts 
+We've seen how one task is able to yield control to another task (or to the scheduler).
+An system of asyncronous programming that relies on tasks freely yielding control is called _cooperative multitasking_, as opposed to a system where the scheduler is able to stop other tasks, called _preemptive multitasking_.
+For now, as of Julia 1.12, Julia's system of async is entirely cooperative: Tasks must yield explicitly or implicitly, to be stopped.
+
+Unfortunately, it's pretty easy to write code that does not allocate or otherwise yield explicitly, but which can run for a long time.
+For example, the naive implementation of the fibonacci function:
+"""
+
+# ╔═╡ 87a0896d-38a8-4b44-84b9-8d35a284338d
+fib(x) = x < 2 ? x : fib(x - 2) + fib(x - 1);
+
+# ╔═╡ 5e644139-6db6-49a9-ab68-7ad8c872d483
+# No allocations. But suppose we called fib(100)...
+@time fib(35)
+
+# ╔═╡ 49629d75-2824-4938-999f-d02b65cc8c29
+md"""
+In the _best_ case scenario, scheduling a long-running task which doesn't yield will prevent other tasks from being run.
+
+As we will see in a moment, non-yielding tasks can have even worse consequences.
+As a programmer, the best policy is to never write tasks that don't occasionally yield.
 """
 
 # ╔═╡ 5688d79a-0593-4722-b4f6-252b327746b2
@@ -641,10 +660,9 @@ When the garbage collector (GC) runs, it mutates the data structure that keeps t
 of heap allocations.
 As the golden rule of async goes, _Mutation requires exclusivity_.
 That means no other task can allocate memory at the same time as the garbage collector runs.
-Practically speaking, this means that when one tasks triggers the GC, the GC can't run
-until all other tasks has been blocked  - we say that Julia's GC is a stop-the-world GC.
+Practically speaking, this means that when one tasks triggers the GC, the GC can't run until all other tasks has been blocked, lest they allocate and cause bugs in the GC - we say that Julia's GC is a stop-the-world GC.
 In turn, that means that all running tasks need to know that the GC wants to run,
-such that they can yield.
+such that they can yield and allow it to.
 How is this coordinated?
 
 When the GC wants to run, it modifies a pointer in the thread-local state to
@@ -663,6 +681,27 @@ because each thread creates garbage, so the GC needs to run more often, pausing 
 Second, users need to be wary not to write code where _one_ task allocates memory, triggering the GC, when _another_ is running code that does not call `GC.safepoint()`, by allocating, doing IO, yielding to the schedular or doing dynamic dispatch.
 If this happens, the first task will trigger the GC, blocking all tasks with safepoints, while the safepoint-less task will continue to run. In the worst case, this can lead to deadlocks.
 This issue occur most commonly when one task calls external code, such as a C library.
+"""
+
+# ╔═╡ 602d6b6d-24b2-4cd8-901d-f893772745fb
+md"""
+## Locks
+* Spinlock example (with yield)
+* Advantages and disadvantages
+* Would be better if there was a way to wake up tasks
+
+## Condition
+
+## ReentrantLock
+
+## Semaphore
+
+## Channel
+
+## Useful patterns
+* Sync
+* @threads setting a vector
+* Lower level parallelism
 """
 
 # ╔═╡ a0ed20e1-da3f-4dbc-83b1-1399f0dea805
@@ -935,6 +974,8 @@ The scheduler itself could also be optimised, and so could locks.
 
 ## TODO:
 Some things like IO and sleep callback can only run on thread 1. So if that doesn't yield and can't yield, your system may freeze.
+
+Alslo, preemptyion
 """
 
 # ╔═╡ 7c750b87-b513-4a1b-9a4e-b4dea6651ed0
@@ -1288,7 +1329,11 @@ version = "17.4.0+2"
 # ╠═1d70bc25-b941-4481-8579-80b70e7b6846
 # ╠═6b900c42-127e-463f-b941-c321297537f3
 # ╠═725773df-24c7-4547-84fc-3cd163d19136
+# ╠═87a0896d-38a8-4b44-84b9-8d35a284338d
+# ╠═5e644139-6db6-49a9-ab68-7ad8c872d483
+# ╠═49629d75-2824-4938-999f-d02b65cc8c29
 # ╠═5688d79a-0593-4722-b4f6-252b327746b2
+# ╠═602d6b6d-24b2-4cd8-901d-f893772745fb
 # ╠═a0ed20e1-da3f-4dbc-83b1-1399f0dea805
 # ╠═a305ee04-498a-4933-a813-8550f50a761d
 # ╠═7c750b87-b513-4a1b-9a4e-b4dea6651ed0
