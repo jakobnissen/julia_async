@@ -861,7 +861,7 @@ Luckily, Julia provide a whole bunch of abstractions to make our asyncronous liv
 
 ### Locks: The simple spinlock
 A _lock_ is a data structure used to ensure only one task has access to a piece of data at a time.
-They also have a more illistrative name: _Mutexes_, short for _mutual exclusion_.
+They also have a more illustrative name: _Mutexes_, short for _mutual exclusion_.
 
 When a task calls `lock` on a lock (also called _taking_ or _acquiring_ the lock), it is said to _hold the lock_.
 If another task tries to take a lock that is already held, the task will be blocked.
