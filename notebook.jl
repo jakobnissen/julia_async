@@ -99,7 +99,7 @@ Julia intentionally provide few abstractions to interact with the threads themse
 As a programmer, your focus is supposed to be on managing the tasks, and you can usually simply rely on Julia to do a reasonable job of running the tasks on all available threads in an efficient manner.
 
 Precisely because the user is not supposed to think about threads, Julia has great freedom in which tasks are run on what threads.
-At least abstractly, aA task may be run on any available thread, and even moved between different threads while running, and started and stopped at any point.
+At least abstractly, a task may be run on any available thread, started and stopped arbitrarily, and even moved between threads.
 """
 
 # ╔═╡ ef36118e-2fdf-4c99-a9da-f8cbc6885fb3
@@ -137,7 +137,7 @@ For this reason, the above pattern is really only useful in relatively high-leve
 # ╔═╡ 20ee5cfa-b80c-4a2f-8314-67048c1c429b
 md"""
 ## The law of async
-Since async is all about splitting your program into stoppable and resumable chunks part of your program, converting synchronous code to being asynchronous can be an invasive exercise, in that it may reorganize your entire program.
+Since async is all about splitting your program into stoppable and resumable tasks, converting synchronous code to asynchronous can be an invasive exercise, in that it may reorganize your entire program.
 Async code is also (deservedly) infamous for being tricky to reason about and prone to bugs.
 To reduce the risk of bugs, it helps to internalize the cental law of async:
 
@@ -153,7 +153,7 @@ In this spirit of legalism, let's write some sections of this law:
   That is, it's allowed for two tasks to mutate or operate on
   different elements concurrently.
 
-§ 1b. Some operations appear to only affect one element of the array, but
+§ 1b. Some operations appear to only affect one element of an array, but
   actually affects all of them. E.g. `push!` might cause the whole array
   to be resized, which requires copying the memory of the whole array.
   Therefore, such an operation counts as mutating _every_ element.
@@ -174,7 +174,7 @@ md"""
 Let's have a look at an example of what happens when you violate the law of async.
 
 In the code below, `add_ten_million!` will increment an integer through a reference ten million times. The function `increment_occasionally` will read the same reference, add its content to a result, and then zero the integer in the reference.
-You can envision this as modelling a task that makes progress on some computation, and task that occasionally displays the progress.
+You can envision this as modelling a task that records the current progress on some computation, and another task that occasionally displays the progress since the last update.
 
 The code contains a function call to `Threads.atomic_fence`.
 You can ignore this for now - I'll get back to it later.
@@ -185,7 +185,7 @@ function add_ten_million!(ref)
 	for i in 1:10_000_000
 		ref[] += 1
 		# I'll explain what this fence does later
-		Threads.atomic_fence()
+		atomic_fence()
 	end
 end;
 
@@ -196,7 +196,7 @@ function increment_occasionally(ref)
 	while time_ns() - t < 1_000_000_000
 		result += ref[]
 		ref[] = 0
-		Threads.atomic_fence()
+		atomic_fence()
 	end
 	result
 end;
@@ -247,7 +247,7 @@ Here, the underlying cause is that `ref[] += 1` is composed of several steps, an
 In computer science terms, we say that the problem is that `ref[] += 1` is _not atomic_. Here, "atomic" is used in the original Greek sense, meaning _indivisible_.
 An atomic operation is one that can never be observed is a state of partial completion - it either has not happened yet, or is already complete.
 
-### Even single CPU instructions are not atomic
+#### Even single CPU instructions are not atomic
 It is tempting to try to solve data races like the one above by simply choosing operations which are not implemented in terms of multiple smaller operations.
 But if you look into the generated assembly code for the `add_ten_million!` function above, you will see that the line `ref[] += 1` is compiled to a single instruction - at least on my computer with a x86-64 CPU.
 So naively, one would think that this single instruction would be atomic - not composed of multiple, smaller steps. Nonetheless, the data race happened. Why?
@@ -294,9 +294,9 @@ function increment_occasionally_atomic(atomic)
 	t = time_ns()
 	result = 0
 	while time_ns() - t < 1_000_000_000
-		# Atomic swap does a load and a store in a single atomic
-		# operation, here it swaps the atomic.x field with 0.
-		result += (@atomicswap atomic.x = 0)
+		old = @atomic atomic.x
+		result += old
+		@atomic atomic.x -= old
 	end
 	result
 end;
@@ -420,6 +420,9 @@ end;
 
 # ╔═╡ fd87476d-b32b-4785-9fdc-21da66b9adaa
 md"""
+The mysterious `atomic_fence()` function called in the data racey, non-atomic example above inserts a sequentially consistent memory fence, without doing any actual atomic operations.
+It was needed in the first example to prevent Julia from being too clever and hoisting the increments outside the loop, thereby preventing a data race and foiling my example. 
+
 #### Ordering: Monotonic (or relaxed)
 At the opposite end from sequentially consistent ordering, we have the _monotonic_ ordering, also called _relaxed_ ordering in other languages.
 This ordering provide _no restrictions_ on memory re-ordering, allowing the computer full freedom to re-order operations around for maximal performance.
@@ -435,7 +438,7 @@ md"""
 #### Ordering: Acquire and release
 It turns out, that, most of the time when we _do_ care about memory ordering, we don't require the kind of complete memory barrier that the sequentially consistent ordering provide.
 
-One of the most common scenarios in async programming is when one task computes value, then atomically modifies some flag to signal the value is ready.
+One of the most common scenarios in async programming is when one task computes a value, then atomically modifies a flag to signal the value is ready to be read by another task.
 Meanwhile, another task reads the flag, waiting for it to be changed before the task loads the value and continues processing it.
 
 An example could look like this:
