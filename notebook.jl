@@ -16,7 +16,7 @@ using .Threads
 
 # ╔═╡ 8b83e436-dc12-11ef-1b27-1d3fdefb24c1
 md"""
-# Asyncronous programming in Julia
+# Asynchronous programming in Julia
 _Written 2025-12-26_
 
 **This notebook is hosted at viralinstruction.com**
@@ -27,12 +27,12 @@ When I read blogs or textbooks on programming, I'm struck by the diversity of va
 A lot of blogs describe their programming as revolving around websites and networks, where themes like communication protocols and JavaScript frameworks play major roles.
 In my eight years of scientific programming, I've never had to think about any of that stuff. To me, that's like a parallel universe of software which interacts very little with what I do, or care about, on my job.
 
-Most of the blogs I read mention asyncronous programming in this context of 'websites coding'. So, I thought that async was mostly about how your program handled waiting for network data.
+Most of the blogs I read mention asynchronous programming in this context of 'websites coding'. So, I thought that async was mostly about how your program handled waiting for network data.
 An important subject, perhaps, but surely something I could ignore as a scientist.
 
 Oh boy was that wrong.
 
-In this notebook, I'll dig into asyncronous programming in Julia.
+In this notebook, I'll dig into asynchronous programming in Julia.
 I will begin with the most fundamental building blocks of async, and build up towards the more human-friendly high level async interfaces.
 
 Let's begin.
@@ -49,7 +49,7 @@ TableOfContents()
 # ╔═╡ 17ddbb08-cd8d-446e-b806-dc3000dc2184
 md"""
 ## Why is async important?
-Asyncronous programming means having different parts of your program in progress at the same time, although, as we will see, the meaning of "the same time" is elusive.
+Asynchronous programming means having different parts of your program in progress at the same time, although, as we will see, the meaning of "the same time" is elusive.
 
 To do this, the programming language needs to somehow abstract over 'units of computation' as separate _tasks_ that can be started, paused, restarted and stopped.
 
@@ -95,7 +95,7 @@ Threads.nthreads()
 
 # ╔═╡ f74b1284-dece-4216-bb06-29514415ff5f
 md"""
-Julia intentionally provide few abstractions to interact with the threads themselves, focusing instead on _tasks_ as the central unit of asyncronous computing.
+Julia intentionally provide few abstractions to interact with the threads themselves, focusing instead on _tasks_ as the central unit of asynchronous computing.
 As a programmer, your focus is supposed to be on managing the tasks, and you can usually simply rely on Julia to do a reasonable job of running the tasks on all available threads in an efficient manner.
 
 Precisely because the user is not supposed to think about threads, Julia has great freedom in which tasks are run on what threads.
@@ -104,7 +104,7 @@ At least abstractly, aA task may be run on any available thread, and even moved 
 
 # ╔═╡ ef36118e-2fdf-4c99-a9da-f8cbc6885fb3
 md"""
-To whet our appetite, let's demonstrate a toy use of tasks to achieve asyncrony.
+To whet our appetite, let's demonstrate a toy use of tasks to achieve asynchrony.
 One of the most basic design patterns is to spawn and fetch tasks within a single function. For example, in the following case: 
 """
 
@@ -137,7 +137,7 @@ For this reason, the above pattern is really only useful in relatively high-leve
 # ╔═╡ 20ee5cfa-b80c-4a2f-8314-67048c1c429b
 md"""
 ## The law of async
-Since async is all about splitting your program into stoppable and resumable chunks part of your program, converting syncronous code to being asyncronous can be an invasive exercise, in that it may reorganise your entire program.
+Since async is all about splitting your program into stoppable and resumable chunks part of your program, converting synchronous code to being asynchronous can be an invasive exercise, in that it may reorganise your entire program.
 Async code is also (deservedly) infamous for being tricky to reason about and prone to bugs.
 To reduce the risk of bugs, it helps to internalize the cental law of async:
 
@@ -262,7 +262,7 @@ Once we know that
 1. All CPU operations may be split into multiple steps in the CPU and the memory hierarchy, and
 2. Interacting with data that is in a partially processed state may cause a data race,
 
-we find ourselves forced to conclude that two different tasks can never interact with the same data at all, and so the prospect of writing ayncronous code appear completely hopeless.
+we find ourselves forced to conclude that two different tasks can never interact with the same data at all, and so the prospect of writing aynchronous code appear completely hopeless.
 
 ## Atomic operations
 Fortunately, Julia provides dedicated _atomic operations_ to address this problem. The compiler guarantees that these operations are always compiled down to dedicated atomic CPU instructions, which the CPU in turn guarantees are actually atomic.
@@ -386,8 +386,8 @@ We can construct even more cursed situations where the lack of happens-before be
 We _could_ then explain why this can happen in terms of the complex underlying implementation in the CPU and memory hierarchy, but as I previously said, there's little point in trying to peek behind the curtain. Just use atomics when sharing data between tasks, or else you'll get bugs.
 
 ### Atomic memory orderings
-It's important to keep in mind _why_ our compiler, CPU and memory re-order operations, making asyncronous code so damned hard to reason about: Speed.
-Computers could be built perfectly syncronously with no out-of-order execution, but they would run tens, or hundreds of times slower.
+It's important to keep in mind _why_ our compiler, CPU and memory re-order operations, making asynchronous code so damned hard to reason about: Speed.
+Computers could be built perfectly synchronously with no out-of-order execution, but they would run tens, or hundreds of times slower.
 The more we restrict out-of-order computation using atomics, the slower our program runs.
 Ideally, we want to place only the exact amount of re-ordering restrictions to allow our async code to be correct, but no more.
 
@@ -473,7 +473,7 @@ They each create one-way memory barriers; release creates an after => before bar
 # ╔═╡ 606f9ce3-90f2-442c-aac7-d2a24a61f180
 md"""
 ### Atomic swap
-There are situations where atomic reads and atomic writes are not enough to ensure syncronisation between threads.
+There are situations where atomic reads and atomic writes are not enough to ensure synchronisation between threads.
 
 The example below is similar to the previous example, but now two tasks are waiting to process the data at the same time - we can call these _consumer tasks_.
 In this example there is no real need to have multiple tasks waiting, but one could imagine that the consumer tasks process a stream of data produced by the main producer task.
@@ -523,7 +523,7 @@ run_example()
 
 # ╔═╡ f2f2e703-9874-4872-958b-d653f9a8365a
 md"""
-The above example has a syncronisation bug. Can you spot it?
+The above example has a synchronisation bug. Can you spot it?
 
 It is possible for the two consumer tasks to simultaneously read `is_ready` and break out of the while loop, before either of them is able to set `is_ready.x = false` to disable the other task. It's unlikely, but absolutely possible.
 
@@ -726,7 +726,7 @@ Especially for IO-related resources like the file system and network, they may n
 
 Typically, we distinguish between _blocking_ and _non-blocking_ operations. When executing a blocking operation, the program will halt and wait for the resource to be available, before progressing. In contrast, a non-blocking operation will return some kind of object representing a soon-to-be-available resource, and immediately return. The code can then intermittently check the object whether the resource has become available yet, and switch to other tasks to do useful work in the meantime.
 
-This is the reason that async is often mentioned in the context of network programming: Networks are especially slow, so writing asyncronous code that uses non-blocking IO may reap large benefits. 
+This is the reason that async is often mentioned in the context of network programming: Networks are especially slow, so writing asynchronous code that uses non-blocking IO may reap large benefits. 
 
 In Julia, all IO is non-blocking _from OS' point of view_, in the sense that the OS, when a resource is requested, will return control back to the Julia scheduler immediately.
 However, from the point of view of a _Julia task_, IO is always blocking, in the sense that the scheduler will make sure to not schedule the task that requested the resource, until the OS has informed the scheduler that the resource is ready.
@@ -752,7 +752,7 @@ Tasks which are managed by the language runtime's own scheduler, and which can b
 md"""
 ### Cooperative multitasking and interrupts 
 We've seen how one task is able to yield control to the scheduler (or another task).
-A system of asyncronous programming that relies on tasks freely yielding control is called _cooperative multitasking_, as opposed to a system where the scheduler is able to stop other tasks, called _preemptive multitasking_.
+A system of asynchronous programming that relies on tasks freely yielding control is called _cooperative multitasking_, as opposed to a system where the scheduler is able to stop other tasks, called _preemptive multitasking_.
 For now, as of Julia 1.12, Julia's system of async is entirely cooperative: Tasks must yield explicitly or implicitly, to be stopped.
 
 Unfortunately, it's pretty easy to write code that does not allocate or otherwise yield explicitly, but which can run for a long time.
@@ -812,9 +812,9 @@ Let's all appreciate the hardware designers who have worked hard to solve this p
 _Mostly_. There is one case I know of where the problem of cache coherence rears its head and appears to us programmers, and that is _false sharing_.
 
 When the CPU cache copies data, it copies whole _cache lines_, usually 64 consecutive bytes, depending on your specific CPU model.
-The CPU's _cache coherence protocol_ keeps track of which cache lines has been altered by one core. If another core requests the same cache line, the line needs to be syncronized between cores.
+The CPU's _cache coherence protocol_ keeps track of which cache lines has been altered by one core. If another core requests the same cache line, the line needs to be synchronized between cores.
 
-This has implication for asyncronous code: If one task mutates a piece of data, then all other data allocated on the same cache line will be slower to access for tasks running on another core.
+This has implication for asynchronous code: If one task mutates a piece of data, then all other data allocated on the same cache line will be slower to access for tasks running on another core.
 We call this _false sharing_, because even though no single object is shared between tasks, different objects allocated on the same cache line still needs to use the cache coherence protocol just as if they were.
 
 We can demonstrate it with the code below, which increments every element in an array on multiple tasks in parallell: In the `update_bytes_bad` case, the tasks operate on interleaved elements of the vector. With one byte per element, this means a single cache line contains 64 elements, so all eight tasks will write to the same cache line at the same time.
@@ -855,9 +855,9 @@ end;
 
 # ╔═╡ 602d6b6d-24b2-4cd8-901d-f893772745fb
 md"""
-## Higher level syncronisation abstracts
+## Higher level synchronisation abstracts
 The abstractions provided by atomic operations are too low level for most programmer's taste.
-Luckily, Julia provide a whole bunch of abstractions to make our asyncronous lives easier.
+Luckily, Julia provide a whole bunch of abstractions to make our asynchronous lives easier.
 
 ### Locks: The simple spinlock
 A _lock_ is a data structure used to ensure only one task has access to a piece of data at a time.
@@ -896,7 +896,7 @@ end;
 md"""
 The defining property of a spinlock is that `lock` is implemented as a simple while loop.
 
-Using this lock, we can now mutate some data asyncronously in multiple tasks at once, without worrying about violating the law of async.
+Using this lock, we can now mutate some data asynchronously in multiple tasks at once, without worrying about violating the law of async.
 Let's demonstrate this by pushing to a vector on two tasks in parallel.
 
 Below, I'll use method `lock(::Function, ::AbstractLock)`, which is defined as:
@@ -1245,7 +1245,7 @@ end
 md"""
 Be aware that `@sync` is a macro, and therefore only operates on the _source code_ of the content of the sync block.
 That means it's only able to detect _literal_ `@spawn` blocks.
-If you e.g. write a function that spawns a task, and then call this function in the sync block, the macro will not be aware that a task was spawned and therefore will not do anything to syncronise that task.
+If you e.g. write a function that spawns a task, and then call this function in the sync block, the macro will not be aware that a task was spawned and therefore will not do anything to synchronise that task.
 """
 
 # ╔═╡ 513c6b05-23ed-4174-802a-2ade2acf2adc
@@ -1277,18 +1277,18 @@ Thus, if this pattern is used in low-level code, the benefit from parallelism wi
 # ╔═╡ a6172e40-8288-440f-b684-2268b218c3f3
 md"""
 ## Avoid reasoning about threads in Julia
-Throughout this notebook, I have spoken of asyncronous code in terms of code running in multiple _tasks_, whereas other material on this topic usually centers on running multiple _threads_.
+Throughout this notebook, I have spoken of asynchronous code in terms of code running in multiple _tasks_, whereas other material on this topic usually centers on running multiple _threads_.
 
 In one sense, the distinction is straightforward, since there is a clear denotational difference: A _task_ is a piece of code that can be executed by the scheduler. A _thread_ is a resource provided by the operating system, upon which one task can be run at a time.
 
 However, systems differ in which of these two concepts are considered _central_, tasks or threads.
-As Julia's support for asyncronous code has improved, it has become increasingly apparent that tasks, and not threads, provide the most useful level of abstraction to work on, and that users should avoid reasoning about threads where practical.
+As Julia's support for asynchronous code has improved, it has become increasingly apparent that tasks, and not threads, provide the most useful level of abstraction to work on, and that users should avoid reasoning about threads where practical.
 
 To continue the analogy between the garbage collector and scheduler, it is possible to reason about Julia data structures in terms of pointers to the memory addresses where the data is located.
 But this is a poor level of abstraction: Referring to objects by their memory location is both cumbersome, and also prevents important optimisations like stack-allocating memory transparently, and moving data in memory.
-Similarly, writing asyncronous code with threads in mind cause at least two issues that I know about:
+Similarly, writing asynchronous code with threads in mind cause at least two issues that I know about:
 
-First, the author of a library can't know how many threads are available on the computer where the code is running, nor which other libraries are running asyncronous code concurrently.
+First, the author of a library can't know how many threads are available on the computer where the code is running, nor which other libraries are running asynchronous code concurrently.
 Therefore, the number of available and busy threads must be assumed to always be in flux.
 
 Second, the Julia scheduler may pause a task, then resume it on another thread. The fact that the current thread may change any time the concept of a current thread ephemeral and meaningless.
@@ -1299,7 +1299,7 @@ md"""
 ## The future of async in Julia
 Async has been an area of intense development in Julia since shortly after version
 1.0. It was deemed a priority to flesh out async quickly after 1.0, because it was
-feared that in the absence of a good set of abstractions for async, the Julia ecosystem might begin to rely too much on syncronicity, making async harder to add later.
+feared that in the absence of a good set of abstractions for async, the Julia ecosystem might begin to rely too much on synchronicity, making async harder to add later.
 Even though the most important work on async has already been done, there are still
 a few areas that the core developers seek to improve:
 
@@ -1315,7 +1315,7 @@ As previously mentioned, having a stop-the-world garbage collector currently cre
 with concurrent workloads.
 There are several ways the situation could be improved in the future:
 
-* An entirely new garbage collector design, which requires less syncronization
+* An entirely new garbage collector design, which requires less synchronization
   between individual threads, such as the recently added
   [non-moving immix GC](https://github.com/JuliaLang/julia/pull/56288)
   could reduce the need for stopping the world.

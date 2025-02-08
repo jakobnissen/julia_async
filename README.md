@@ -1,1 +1,1 @@
-# Asyncronous programming in Julia
+# Asynchronous programming in Julia
