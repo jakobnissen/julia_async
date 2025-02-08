@@ -313,7 +313,7 @@ end
 md"""
 Voila! The bug disappeared.
 
-## Memory re-ording
+## Memory re-ordering
 Atomic operations have a _memory ordering_ associated with them.
 To understand memory ordering, it is necessary to take a detour and look at how memory re-ordering happens in normal non-atomic code that is executed within a task.
 
