@@ -17,7 +17,7 @@ using .Threads
 # ╔═╡ 8b83e436-dc12-11ef-1b27-1d3fdefb24c1
 md"""
 # Asyncronous programming in Julia
-_Written 2025-12-26_
+_Written 2025-01-26_
 
 **This notebook is hosted at viralinstruction.com**
 
