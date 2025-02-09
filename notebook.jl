@@ -95,7 +95,7 @@ When tasks are started, they run on an underlying _thread_ provided by the opera
 The total number of threads currently needs to be set from command line when starting Julia using the command-line flag `--threads` (or `-t`, for short).
 It's the job of the operating system to distribute hardware resources (e.g. CPU time) among the threads.
 
-A CPU core can only run one or two threads at a time, so the number of threads are usually a small, fixed number corresponding to the core count of the CPU.
+A CPU core can only run one or two threads at a time, so the number of threads is usually a small, fixed number corresponding to the core count of the CPU.
 You can check the number of current threads with the function `Threads.nthreads()`:
 """
 
@@ -269,7 +269,7 @@ Once we know that
 1. All CPU operations may be split into multiple steps in the CPU and the memory hierarchy, and
 2. Interacting with data that is in a partially processed state may cause a data race,
 
-we find ourselves forced to conclude that two different tasks can never interact with the same data at all, and so the prospect of writing asynchronous code appear completely hopeless.
+we find ourselves forced to conclude that two different tasks can never interact with the same data at all, and so the prospect of writing asynchronous code appears completely hopeless.
 
 ## Atomic operations
 Fortunately, Julia provides dedicated _atomic operations_ to address this problem. The compiler guarantees that these operations are always compiled down to dedicated atomic CPU instructions, which the CPU in turn guarantees are actually atomic.
@@ -676,7 +676,7 @@ So: How do function calls work?
 In x86-64 CPUs, the rip (register instruction pointer) register stores
 the memory location of the next instruction to be executed by the CPU.
 To begin executing a function, we need to change the value of this register to
-point to the first instructions of our callee.
+point to the first instruction of our callee.
 Changing the value of the rip register is done with a _jump_ instruction -
 i.e. we say that the program jumps to some memory location.
 However, first, the CPU needs to make sure it can resume the work when the callee
@@ -758,7 +758,7 @@ We will return to various blocking operations later in this notebook.
 md"""
 ### The Julia scheduler and the OS scheduler
 The purpose of the Julia scheduler is to run Julia tasks on the limited number of threads provided by the operating system. 
-Your operating system (OS) also has a scheduler, whose analogous job it is to map threads only the limited number of CPU cores provided by the hardware.
+Your operating system (OS) also has a scheduler, whose analogous job it is to map threads onto the limited number of CPU cores provided by the hardware.
 
 This raises a question: If the OS _already_ has a scheduler which maps an arbitrary number of threads onto your CPU cores, why does Julia even bother with a scheduler itself? Why doesn't every task simply spawn an OS level thread, and then let the OS efficiently manage the threads?
 
@@ -800,7 +800,7 @@ When the garbage collector (GC) runs, it mutates the data structure that keeps t
 of heap allocations.
 As the golden rule of async goes, _mutation requires exclusivity_.
 That means no other task can allocate memory at the same time as the garbage collector runs.
-Practically speaking, this means that when one tasks triggers the GC, the GC can't run until all other tasks has been blocked, lest they allocate and cause a data race in the GC.
+Practically speaking, this means that when one tasks triggers the GC, the GC can't run until all other tasks have been blocked, lest they allocate and cause a data race in the GC.
 For this reason, we say that Julia's GC is a _stop-the-world GC_.
 In turn, that means that all running tasks need to know that the GC wants to run,
 such that they can block.
@@ -875,7 +875,7 @@ end;
 # ╔═╡ 602d6b6d-24b2-4cd8-901d-f893772745fb
 md"""
 ## Higher level synchronization abstracts
-The abstractions provided by atomic operations are too low level for most programmer's taste.
+The abstractions provided by atomic operations are too low level for most programmers' taste.
 Luckily, Julia provide a whole bunch of abstractions to make our asynchronous lives easier.
 
 Most of these abstractions are in the form of datastructures that support async-friendly operations, which are guaranteed not to cause data races.
@@ -984,7 +984,7 @@ The vulnerability to deadlocks comes from the nature of locks themselves, being 
 There is no principled way to avoid them, but a good rule of thumb is to always notice when a task is doing a blocking operation while holding a lock.
 If the unblocking of the task can ever be dependent on the lock being unlocked, there is potential for deadlock.
 
-As the simplest kind of while loop, spinlocks bring both advantages as disadvantages:
+As the simplest kind of while loop, spinlocks bring both advantages and disadvantages:
 One one hand, the tight while loop means that spin locks have low latency - once the lock is unlocked, a waiting task will almost immediately be able to take it.
 On the other hand, each waiting task is kept busy by the continual while loop. If there are many tasks waiting, or if the wait time can be expected to be long, this represents a lot of pointless work for the computer.
 
@@ -995,7 +995,7 @@ A condition is used to signal between tasks that something is ready.
 When a task waits for a condition, it becomes blocked, yielding to the scheduler.
 Then, when a notification is sent to the condition, the waiting tasks are woken up and rescheduled. 
 
-Compared to a spinlock, the main advantage of a condition is that a task waiting for a condition don't use the CPU.
+Compared to a spinlock, the main advantage of a condition is that a task waiting for a condition doesn't use the CPU.
 
 In Julia, we can use `Threads.Condition` to create a condition, and use it with `wait(::Threads.Condition)` and `notify(::Threads.Condition)`.
 Just like a lock is taken with the `lock` function, so must a condition be taken with `lock` to call `wait` or `notify`.
@@ -1277,7 +1277,7 @@ If you e.g. write a function that spawns a task, and then call this function in 
 # ╔═╡ 513c6b05-23ed-4174-802a-2ade2acf2adc
 md"""
 ### The spawn-fetch pattern
-Another common pattern when you have a function that does two or more things which can run independently.
+Another common pattern is a function that does two or more things which can run independently.
 For example, suppose you have a function that needs to read in both a config file and a data file, and then process the data according to the configuration.
 The processing depends on having read the two files, but the two files can be read in parallel.
 
@@ -1369,7 +1369,7 @@ If the unyielding task relies on an IO operation in order to complete, the syste
 Practically speaking, this situation can be avoided by following the maxim to _never write an unyielding task_, but it's still unfortunate that the consequences of failing to do so are unnecessarily dire.
 
 ### Various optimisation
-Many of the important moving parts has not been thoroughly optimised.
+Many of the important moving parts have not been thoroughly optimised.
 In particular, the core devs have long talked about making the `Task` objects
 faster and more memory efficient to create.
 That would enable lower level parallelism, such as using the spawn-fetch pattern more broadly.
@@ -1710,7 +1710,7 @@ version = "17.4.0+2"
 # ╠═2bd97906-edc8-48e8-ac2d-6a87a2e01fe5
 # ╟─c4f33908-efab-4654-b9dd-b4e46573428a
 # ╠═5e45c378-3788-484c-906b-86586c8cd7c8
-# ╠═a8acd763-7068-4a2c-9dd9-8f926680f8b7
+# ╟─a8acd763-7068-4a2c-9dd9-8f926680f8b7
 # ╠═de1f77c2-bdbb-4192-ba24-da41489c0a8b
 # ╟─f74b1284-dece-4216-bb06-29514415ff5f
 # ╟─ef36118e-2fdf-4c99-a9da-f8cbc6885fb3
