@@ -81,7 +81,7 @@ md"""
 The most common (but not _only_!) use case for tasks is to allow _parallel computation_, where multiple tasks are running at the same time.
 
 When tasks are started, they run on an underlying _thread_ provided by the operating system.
-The total number of threads currently needs to be set from command line when starting Julia using the command-line flag `-t`.
+The total number of threads currently needs to be set from command line when starting Julia using the command-line flag `-t` or `--threads`.
 It's the job of the operating system to distribute hardware resources (e.g. CPU time) among the threads.
 
 A CPU core can only run one or two threads at a time, so the number of threads are usually a small, fixed number corresponding to the core count of the CPU.
@@ -596,7 +596,7 @@ begin
 
 	function add_to_queue_unless_full(queue::Atomic{Int})
 		compute_stuff_to_add_to_queue()
-		while (@atomic :aquire queue.x) >= 5
+		while (@atomic :acquire queue.x) >= 5
 			sleep(0.001)
 		end
 		(@atomic :release queue.x += 1)
@@ -802,7 +802,9 @@ because each thread creates garbage, so the GC needs to run more often, pausing 
 
 Second, users need to be wary not to write code where _one_ task allocates memory, triggering the GC, when _another_ is running code that does not call `GC.safepoint()`, by allocating, doing IO, yielding to the schedular or doing dynamic dispatch.
 If this happens, the first task will trigger the GC, blocking all tasks with safepoints, while the safepoint-less task will continue to run.
-This issue occur most commonly when one task calls external code, such as a C library.
+That means your multi-threaded workload will inadvertently turn single-threaded, potentially making it several times slower.
+
+This issue occur most commonly when one task calls long running non-Julia code, like a C library, which naturally don't have safepoints for the Julia GC.
 """
 
 # ╔═╡ 545e5844-1624-4f5d-b0bc-fa900cd8562c
@@ -820,41 +822,37 @@ The CPU's _cache coherence protocol_ keeps track of which cache lines has been a
 This has implication for asynchronous code: If one task mutates a piece of data, then all other data allocated on the same cache line will be slower to access for tasks running on another core.
 We call this _false sharing_, because even though no single object is shared between tasks, different objects allocated on the same cache line still needs to use the cache coherence protocol just as if they were.
 
-We can demonstrate it with the code below, which increments every element in an array on multiple tasks in parallel: In the `update_bytes_bad` case, the tasks operate on interleaved elements of the vector. With one byte per element, this means a single cache line contains 64 elements, so all eight tasks will write to the same cache line at the same time.
-In the function `update_bytes_good`, the tasks are given non-overlapping chunks of the array to process.
-
-The timings you see depend very much on your precise brand of CPU.
+We can demonstrate it with the code below, which increments every element in an array on multiple tasks in parallel: When `false_share` is benchmarked the first time below, the eight tasks works on interleaved elements of the vector. Since a 64-byte cache line contains 64 single-byte elements, that means all eight tasks will write to the same cache lines at the same time.
+In contrast, the second time the function is benchmarked, each task will get its own 64-byte slice of the vector to update such that no cache line is shared between tasks.
 """
 
 # ╔═╡ 9a6d75a0-0f0c-4909-886d-9a2377ef0ee7
 begin
-	function update_bytes_bad(v::Vector{UInt8}, offset::Int)
-		for _ in 1:1000, i in 1+offset:8:length(v)
-			v[i] += 0x01
-		end
-	end
-
-	function update_bytes_good(v::Vector{UInt8}, offset::Int)
-		len = div(length(v), 8)
-		for _ in 1:1000, i in offset*len+1:(offset+1):len
-			v[i] += 0x01
+	function update_bytes(v::Vector{UInt8}, start::Int, step::Int)
+		chunksize = div(length(v), 8)
+		for _ in 1:1_000_000
+			p = start
+			for _ in 1:chunksize
+				v[p] += 0x01
+				p += step
+			end
 		end
 	end
 	
-	function false_share(f)
-		v = zeros(UInt8, 2^20)
+	function false_share(starts, inc)
+		v = zeros(UInt8, 512)
 		tasks = map(1:8) do i
-			@spawn f(v, i-1)
+			@spawn update_bytes(v, starts[i], inc)
 		end
 		foreach(wait, tasks)
 	end
 end;
 
 # ╔═╡ 05524538-352d-4dff-9f24-5844b46635c8
-@btime false_share(update_bytes_bad)
+@btime false_share(1:8, 8)
 
 # ╔═╡ af561fc4-9b1b-405a-90a6-8bc18e93bf3f
-@btime false_share(update_bytes_good)
+@btime false_share(1:64:512, 1)
 
 # ╔═╡ 602d6b6d-24b2-4cd8-901d-f893772745fb
 md"""
@@ -1193,6 +1191,7 @@ Having each element go through channels incurs some overhead per element, but on
 In some older texts on Julia parallelism, the author will recommend instead an **incorrect** pattern that relies on `threadid()` like this:
 
 ```julia
+# Do NOT use this pattern!
 results = Vector{Int}(undef, Threads.nthreads())
 @threads for input in inputs
 	results[Threads.threadid()] = input + 1
@@ -1236,7 +1235,7 @@ try
 	end
 catch err
 	if err isa CompositeException
-		global comp_error # for inspection later
+		global comp_error = err # for inspection later
 		println("One or more of the tasks failed with the following errors!")
 		@show err.exceptions
 	else
@@ -1253,7 +1252,7 @@ If you e.g. write a function that spawns a task, and then call this function in 
 
 # ╔═╡ 513c6b05-23ed-4174-802a-2ade2acf2adc
 md"""
-#### The spawn-fetch pattern
+### The spawn-fetch pattern
 Another common pattern when you have a function that does two or more things which can run independently.
 For example, suppose you have a function that needs to read in both a config file and a data file, and then process the data according to the configuration.
 The processing depends on having read the two files, but the two files can be read in parallel.
@@ -1273,7 +1272,7 @@ end;
 md"""
 Above, the configuration file is being read while another task is reading the data file in the background, allowing the two to work in parallel. Then, the result of the task is fetched before proceeding. Remember that Julia currently doesn't do type inference across tasks, so I need to typeassert the return type of `fetch`.
 
-This pattern is only useful for relatively high level functions, because of the five second overhead associated with spawning and managing a task.
+This pattern is only useful for relatively high level functions, because of the five microsecond overhead associated with spawning and managing a task.
 Thus, if this pattern is used in low-level code, the benefit from parallelism will be outweighed by the task management overhead.
 """
 
@@ -1335,7 +1334,7 @@ Although there, to my knowledge, hasn't been any concrete initiatives, it's poss
 The trick is how to devise a system where tasks may be interrupted while they are doing arbitrary computation, without interrupting them in the middle of some critical operation, thereby causing stack corruption or other awfulness.
 
 ### Allow IO to run from other threads
-Some scheduler operations, such as IO and `Timer` callbacks, can currently operate on thread 1.
+Some scheduler operations, such as IO and `Timer` callbacks, can currently only run on thread 1.
 This limitation awkwardly breaks the abstraction that all tasks may run on any thread, such that the user does not need to think about scheduling.
 
 For example, if the user writes a single task which does not yield, and the scheduler woefully schedules that on thread 1, then no IO can run at all until that task yields again.
@@ -1733,7 +1732,7 @@ version = "17.4.0+2"
 # ╠═87a0896d-38a8-4b44-84b9-8d35a284338d
 # ╠═5e644139-6db6-49a9-ab68-7ad8c872d483
 # ╟─49629d75-2824-4938-999f-d02b65cc8c29
-# ╟─5688d79a-0593-4722-b4f6-252b327746b2
+# ╠═5688d79a-0593-4722-b4f6-252b327746b2
 # ╟─545e5844-1624-4f5d-b0bc-fa900cd8562c
 # ╠═9a6d75a0-0f0c-4909-886d-9a2377ef0ee7
 # ╠═05524538-352d-4dff-9f24-5844b46635c8
