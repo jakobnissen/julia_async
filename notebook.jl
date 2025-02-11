@@ -95,7 +95,7 @@ When tasks are started, they run on an underlying _thread_ provided by the opera
 The total number of threads currently needs to be set from command line when starting Julia using the command-line flag `--threads` (or `-t`, for short).
 It's the job of the operating system to distribute hardware resources (e.g. CPU time) among the threads.
 
-A CPU core can only run one or two threads at a time, so the number of threads is usually a small, fixed number corresponding to the core count of the CPU.
+A CPU core can only run one thread at a time, so the number of threads is usually a small, fixed number corresponding to the core count of the CPU.
 You can check the number of current threads with the function `Threads.nthreads()`:
 """
 
@@ -379,8 +379,11 @@ end;
 md"""
 Here, `observe_overwrite()` may return both `false` and `true`.
 
-That may surprise you. After all, `b[] = a[]` is guaranteed to happen after `a[] = true`, since `b` depends on `a`.
-Therefore, you would think, in `observe_overwrite`, if `b[]`, then `a[] = true` must have already happened, and therefore, `a[]` necessarily must return `true`.
+That may surprise you. After all, we may naively reason that:
+* `b[] = a[]` is guaranteed to happen after `a[] = true`, since `b` depends on `a`, and `b[] = a[]` is placed after `a[] = true` in a function running in the same task.
+* Therefore, if we observe `b[]` is `true`, so must `a[]` be.
+* Therefore, in the expression `b[] ? a[] : true`, if `b[]`, then it returns `a[]` (which must be `true`), and if not `b[]`, then it returns a literal `true`.
+* Therefore, `observe_overwrite()` will always return `true`.
 
 Right?
 
@@ -745,8 +748,6 @@ Especially for IO-related resources like the file system and network data, they 
 
 Here, we distinguish between _blocking_ and _non-blocking_ operations. When executing a blocking operation, the program will halt and wait for the resource to be available, before progressing. In contrast, a non-blocking operation will return some kind of object representing a soon-to-be-available resource, and immediately return. The code can then intermittently check the object whether the resource has become available yet, and switch to other tasks to do useful work in the meantime.
 
-This is the reason that async is often mentioned in the context of network programming: Networks often have significant latency, so even with only a single thread available, several tasks can often be run concurrently.
-
 In Julia, all IO is non-blocking _from OS' point of view_, in the sense that the OS, when a resource is requested, will return control back to the Julia scheduler immediately and alert the scheduler when the resource is available.
 However, from the point of view of a _Julia task_, IO is always blocking, in the sense that the scheduler will make sure to not schedule the task that requested the resource until the resouce is ready.
 
@@ -810,18 +811,20 @@ When the GC wants to run, it modifies a globally available pointer, such that it
 The function `GC.safepoint()` loads data from this pointer. If the pointer is
 invalid, this triggers a SIGSEGV (segfault signal), which is handled by Julia's custom SIGSEGV handler, to block the current thread until the GC has been run.
 If the pointer is valid (i.e. the GC has not signalled it wants to run), this pointer load has no effect and takes only half a nanosecond.
-Therefore, calls to the `GC.safepoint()` is peppered across various functions in the Julia runtime, like memory allocation or IO.
+As of Julia 1.12, safepoints are automatically inserted into any non-inlined function call, so the only way for a task to _not_ regularly hit safepoints is if the task only executes a single, tight loop.
 
 The inter-thread coordination needed to run the GC impacts how the user needs to write multithreaded code:
 
 First, allocation-heavy code should be expected to scale worse with the number of threads than non-allocating tasks, because each thread creates garbage, so the GC needs to run more often.
 And whenever it _does_ run, it needs to wait for every thread to reach the next safepoint.
 
-Second, users need to be wary not to write code where _one_ task allocates memory, triggering the GC, when _another_ is running code that does not call `GC.safepoint()`, by allocating, doing IO, yielding to the schedular or doing dynamic dispatch.
+Second, users need to be wary not to write code where _one_ task allocates memory, triggering the GC, when _another_ is running code that does not hit a safepoint.
 If this happens, the first task will trigger the GC, blocking all tasks with safepoints, while the safepoint-less task will continue to run.
 That means your multi-threaded workload will inadvertently turn single-threaded, potentially making it several times slower.
 
-This issue occur most commonly when one task calls long running non-Julia code, like a C library, which naturally don't have safepoints for the Julia GC.
+Because safepoints are inserted into all non-inline function calls, there are only two situations where this can be expected to occur:
+* If a task is stuck in a simple, tight loop
+* When a task executes non-Julia code, e.g. when calling a C library which naturally don't have safepoints for the Julia GC.
 """
 
 # ╔═╡ 545e5844-1624-4f5d-b0bc-fa900cd8562c
@@ -902,6 +905,8 @@ begin
 
 	function Base.lock(lck::SimpleSpinLock)
 		while (@atomicswap :acquire lck.held = true)
+			# Make sure to yield so we allow the scheduler to switch
+			# to another task.
 			yield()
 		end
 		return nothing
@@ -1287,39 +1292,182 @@ This is what it looks like:
 
 # ╔═╡ cc56cdff-9d19-46c1-934c-f436439a2980
 function process_by_configuration(data_path, config_path)
-	task = @spawn open(read_data, data_path)
-	open(read_config, config_path)
+	task = @spawn open(read_config, config_path)
+	data = open(read_data, data_path)
 	process(data, fetch(task)::Configuration)
 end;
 
 # ╔═╡ 5c1ac369-15ee-4b36-a7bc-5ff1ba8cd8b1
 md"""
-Above, the configuration file is being read while another task is reading the data file in the background, allowing the two to work in parallel. Then, the result of the task is fetched before proceeding. Remember that Julia currently doesn't do type inference across tasks, so I need to typeassert the return type of `fetch`.
+Above, the data file is being read while another task is reading the configuration file in the background, allowing the two to work in parallel. Then, the result of the task is fetched before proceeding. Remember that Julia currently doesn't do type inference across tasks, so I need to typeassert the return type of `fetch`.
 
 This pattern is only useful for relatively high level functions, because of the five microsecond overhead associated with spawning and managing a task.
 Thus, if this pattern is used in low-level code, the benefit from parallelism will be outweighed by the task management overhead.
 """
 
-# ╔═╡ a6172e40-8288-440f-b684-2268b218c3f3
+# ╔═╡ 7d45e1bb-3b06-46bd-8d38-bef078e9f48f
 md"""
-## Avoid reasoning about threads in Julia
-Throughout this notebook, I have spoken of asynchronous code in terms of code running in multiple _tasks_, whereas other material on this topic usually centers on running multiple _threads_.
-For example, the most basic examples of parallelism in Rust code will explicitly spawn and manage OS-level threads.
+## Async, concurrent, multithreaded
+In this notebook, I've been writing about task, threads, locks et cetera under the banner of _asynchronous_ programming.
+The official documentation of the Rust language describe the same concepts under the heading "_concurrency_".  
+In the official Julia manual, these two concepts [are used interchangeably](https://docs.julialang.org/en/v1/manual/asynchronous-programming/#man-asynchronous).
+Many other resources instead speak of _multithreaded_ code.
 
-In one sense, the distinction is straightforward, since there is a clear denotational difference: A _task_ is a piece of code that can be executed by the scheduler. A _thread_ is a resource provided by the operating system, upon which one task can be run at a time.
+If you are still confused by the distinction between these terms, you are not alone.
+That kind of terminology confetti doesn't make an already complex topic easier to grasp.
 
-However, systems differ in which of these two concepts are considered _central_, tasks or threads.
-As Julia's support for asynchronous code has improved, it has become increasingly apparent that tasks, and not threads, provide the most useful level of abstraction to work on, and that users should avoid reasoning about threads where practical.
-Instead, threads should be seen as a resource transparently provided by the operating system, similar to RAM or CPU cache.
+Part of the confusion comes from a lack of agreement on what exactly each of these terms mean. But the terminology is also muddled because different programming languages provide their own idiosyncratic interfaces to access the underlying OS and CPU abstractions, thereby inevitably creating a prism through which the users' views of the underlying abstractions are viewed.
 
-To continue the analogy between the garbage collector and scheduler, it is possible to reason about Julia data structures in terms of pointers to the memory addresses where the data is located.
-But this is a poor level of abstraction: Referring to objects by their memory location is both cumbersome, and also prevents important optimisations like stack-allocating memory transparently, and moving data in memory.
-Similarly, writing asynchronous code with threads in mind cause at least two issues that I know about:
+At this point in the notebook, you should have a working understanding of the async abstractions provided by the CPU (atomics), the OS (threads) that APIs built on top of those by Julia.
+With that in the baggage, we are now equipped to deal with the confusion head on.
 
-First, the author of a library can't know how many threads are available on the computer where the code is running, nor which other libraries are running asynchronous code concurrently.
-Therefore, the number of available and busy threads must be assumed to always be in flux.
+In the face of slightly divergent definitions, I will have to cut through and settle on a single meaning:
 
-Second, the Julia scheduler may pause a task, then resume it on another thread. The fact that the current thread may change any time makes the concept of a 'current thread' ephemeral and meaningless.
+* Concurrency means that multiple pieces of code (tasks) are in progress at one given time. All the following terms are subsets of concurrent programming.
+* Parallelism means that two tasks are being executed at the same time, as opposed to when single thread of execution switches between multiple tasks.
+* Multithreading means that tasks from the same process can run in parallel on two or more threads provided by the OS.
+
+Normally, since threads are the main abstraction for threads of execution provided by our OS, parallel code implies multithreaded code. However, parallel code can also be executed by different kinds of microprocessors on the same computer (_heterogeneous computing_, e.g. running on a CPU and a GPU concurrently), or on multiple computers in parallel (_distributed computing_). We don't cover those in this notebook. 
+
+When I speak of _asynchronous programming_, I use the definition as stated in Carl Fredrik Samson's book _Asynchronous Programming in Rust_:
+
+> asynchronous programming is the way a programming language or library abstracts over concurrent operations, and how we as users of a language or library use that abstraction to execute tasks concurrently.
+
+This means that "asynchronous programming" covers all aspects of how to write concurrent code.
+Still, some questions are left unanswered. To loop back to the beginning of this notebook, why is asynchronous code mostly mentioned in the context of webpages and web servers? Why do I think it's an underrated subject in scientific programming? And how exactly does the difference in async abstractions across languages change how the terminology is used? 
+"""
+
+# ╔═╡ 131aa45d-1f3a-4fee-bfa5-18b70440b658
+md"""
+#### Async in scientific programming and web development
+In scientific programming, when we are restricted by computational resources, we are usually restricted by raw compute power.
+Our interest in async, therefore, comes from an interest in using parallelism to put more hardware to work - which we do through multithreading (or heterogeneous or distributed computing, not covered here).
+For this reason, scientific code often only talk about writing code "multithreaded", and usually don't speak about such code as being "asynchronous".
+
+The potential performance benefits from multithreading by scientific software can be huge. On my compute cluster at work, the _minimum_ compute one can buy at any time is 40 CPU cores, so foregoing async means leaving 97% of your computer resources idle.
+What's more, at least in my scientific field, most compute-heavy program are easily parallelizable and require only trivial inter-task communication to synchronize.
+
+In the other world of what you may call 'network computing', the state of affairs is characterized by distant computers communicating intermittently and sharing relatively little data. Their tasks use little compute, and the perception of slowness is dominated by latency.
+As such, efficiency comes down to coordinating many tasks per thread, where each task represents some connection, which by itself can only saturate a thread intermittently.
+
+This kind of programming is often explicitly phrased as being "asynchronous" by the frameworks that these people use, and as such the phrase "asynchronous" _itself_, has come to be associated with many tasks per thread. 
+
+Through the prism that is Julia interface's to async, the distinction between the solutions required by these two worlds is barely visible: Both scenarios are solved by spawning a set of tasks which are then automatically scheduled on whatever threads are available. The only difference, it seems, is that networking problems typically require more complex and involved inter-task communication.
+
+In other programming languages however, OS-level threads are not abstracted away, and the language offers a different interface for tasks running on multiple threads versus tasks running on the same thread.
+To get a useful perspective, let's look at a language that is roughly contemporaneous with Julia: The slightly older language Rust. Don't worry, this won't be _another_ fully fledged walkthrough of a different async system, but merely some superficial examples to contrast where Julia is placed in the design space.
+"""
+
+# ╔═╡ 2b7011ee-53f6-4afd-b999-f3fdc5a26df2
+md"""
+### Another perspective: Async in Rust
+Rust provides distinct interfaces for multithreading versus thread-agnostic/within-thread async.
+So, let's look at them separately.
+
+#### Multithreading
+The most basic use of multithreading in Rust is to spawn and manage threads manually:
+
+```rust
+fn main() {
+    // Create some data
+    let mut a = vec![1];
+    a.push(2);
+
+    // Spawn an OS thread with a task defined by a function
+    let thread = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        println!("Sent over numbers: {} and {}", a[0], a[1]);
+    });
+
+    // Wait for the thread to finish
+    thread.join().unwrap();
+}
+```
+
+Instead of manually spawning threads, you can use packages that provide alternative APIs for spawning threads, mapping a set of tasks across the threads, and then collecting the result. A popular package is [rayon](https://docs.rs/rayon/latest/rayon/).
+
+#### Asynchronous Rust
+In addition to dedicated multithreading abstraction, Rust provides a separate system for async, which similar to Julia's system is thread agnostic.
+When Rust users mention "asynchronous code", it is this system in particular they refer to.
+
+In Rust, function to be executed asynchronously must be explicitly marked `async fn`.
+These functions don't return a value of the type `T` they purport to; instead, they return a `Future<T>` object representing the possibly-ongoing computation that will, at some point, return the desired value.
+Note that this interface is an _abstract, high-level description_ of a task, divorced from any concept of who is supposed to execute the task, in what order, on what threads, and when.
+
+An async function can only be executed by one of two kinds of function:
+* _Either_ a function that uses an explicitly instantiated async runtime to manage and execute asynchronous functions. Such a runtime is essentially an instance of something like Julia's scheduler and all its associated data.
+* _Or_, another async function, which itself returns a `Future`, such that the requirement to determine how the function is executed is deferred another layer upward in the call chain.
+
+The Rust language itself only provides the abstract async interface, and leaves it to third party packages to implement the runtime to actually run the tasks.
+In practice, the package `tokio` completely dominates the ecosystem and is the _de facto_ standard async runtime.
+
+Let's see an example of the `tokio` runtime executing some simple async code:
+
+```rust
+async fn add_one(x: i32) -> i32 {
+    x + 1
+}
+
+async fn print_num_plus_one(x: i32) {
+    // Sleep 1 second. Note that the sleeping MUST happen within
+    // the same async framework, here the tokio package
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let res = add_one(x);
+    println!("{} plus one is: {}", x, res.await);
+}
+
+fn main() {
+    // Create a runtime to manage the async (i.e. scheduler etc.)
+    // Here, we use the tokio crate, the most widely used Rust async runtime
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let num = 5;
+
+    // Use the runtime to schedule and manage the async function
+    runtime.block_on(async {
+        let future = print_num_plus_one(num);
+        future.await;
+    })
+}
+```
+
+Tokio's runtime then schedules the tasks on different threads arbitrarily, quite similar to how Julia's built-in runtime does it.
+"""
+
+# ╔═╡ 5338dab4-112b-4572-875b-73c33ef32113
+md"""
+#### Async abstraction: Rust vs Julia
+Before Rust 1.0, Rust used to have a green threading async system, similar to Julia. The Rust developers electing to change it for version 1.0 poses an interesting question: What are the advantages and disadvantages of one approach versus the other?
+
+When comparing Rust's and Julia's async the major confounding factor is Rust's ownership/lifetime system versus Julia's garbage collector.
+Async in Rust has a bad reputation, mostly because the very concept of lifetimes is undermined by asynchrony, leading to a poor user experience - the async dialect of Rust has been described as a different, worse language. 
+Even as the lifetime/async interaction is one of the major factors for the 'feel' of async Rust, it's caused by a separate language design problem of memory management, as so is not informative for the comparison between Rust and Julia's async system itself.
+As such, we will skate over it here.
+
+Rust's abstract async, divorced from any concrete scheduler allows a Rust program to use a custom scheduler more optimal for a specific workload. It also allows single-task Rust programs to use _no_ scheduler at all.
+The latter is important, because it allows Rust's runtime to be minimal and its binaries small, making it more useful for low-level computing such as writing a part of an operating system.
+This concern alone may have made green threading a deal breaker for Rust.
+
+On the flip side, the different available runtimes do not compose well. If you have multiple in one program, they will not know about each other, and not be able to coordinate their scheduling of the same underlying OS threads.
+Many functions relevant to async become tied to the specific runtime, for example in my example above, where I needed to use _tokio's_ version of `sleep`, as distinct from e.g. the stdlib's `std::thread::sleep`.
+The poor composability of runtimes pushes the ecosystem to coalesce around a single async runtime - currently `tokio` which sees more usage than all other runtimes combined.
+As the ecosystem does so, it becomes increasingly harder to use a different runtime, negating much of the theoretical benefit of runtime-agnostic async abstractions.
+
+In Julia, all code can interact with the runtime, since there is only one and it's always available. In Rust, async code generally can't refer to the runtime, and therefore can't synchronize async code at arbitrary points.
+One consequence is that if one function becomes async, it forces its callers to also become async.
+This means async has a tendency to proliferate across a codebase as callees 'convert' more and more of their callers to async, simply for compatibility. Rustaceans say that _async is viral_.
+In practice, this means many libraries have resorted to duplicating their API into a sync and an async API, which in my view is horrifying from an API perspective.
+
+In line with Rust's emphasis on explicitness, Rust's tasks are switched to and from at explicit wait points, whereas Julia includes lots of implicit yield points. This frequent yielding makes Julia's task easier to schedule efficiently, at the cost of providing less control of e.g. latency to the programmer.
+Also, the fact that Julia tasks can yield at almost arbitrary points means that they must carry a rather large stack of their own, such that they can preserve almost arbitrary state between being paused and resumed.
+Rust tasks, in contrast, being interrupted at only some fixed points, store much less state and do not carry their own stack.
+This makes Rust tasks _much, much_ more memory efficient and faster to create and discard.
+In a small test benchmark, I found `tokio` tasks to consume about 320 bytes per task, whereas Julia consumed _fifty times more_, at 16 KiB.
+
+Julia's API is a single, unified model of multi- and single-threaded task parallelism in a single runtime. Rust's async API is fractured between the thread-specific and `async` in the stdlib, and the several APIs exposed by the various async runtimes (in reality: mostly tokio), and packages like rayon.
+
+In conclusion, Rust and Julia use completely different approaches to async, each with their own strengths:
+Julia's system brings ease of use, a unifying abstraction, easy composition across packages, and a good out of the box performance.
+The advantages of Rust's system is an opt-in runtime, smaller, low-overhead tasks, a larger degree of control, and customizable runtime for special circumstances.
 """
 
 # ╔═╡ a305ee04-498a-4933-a813-8550f50a761d
@@ -1331,14 +1479,14 @@ feared that in the absence of a good set of abstractions for async, the Julia ec
 Even though the most important work on async has already been done, there are still
 a few areas that the core developers seek to improve:
 
-### Inference in tasks
+#### Inference in tasks
 Currently, Julia can't do inference across tasks. That implies that e.g. `fetch`
 is always inferred as `Any`.
 Practically speaking, I recommend users to typeassert the results of `fetch`.
 This is obviously annoying, and it'd be much nicer
 if Julia had inter-task inference on the same level as inter-function inference.
 
-### Better multithreaded garbage collection
+#### Better multithreaded garbage collection
 As previously mentioned, having a stop-the-world garbage collector currently creates problems
 with concurrent workloads.
 There are several ways the situation could be improved in the future:
@@ -1350,16 +1498,16 @@ There are several ways the situation could be improved in the future:
 
 * The Julia compiler could gain an understanding of when a function allocates.
   A function that doesn't allocate, or only allocates in a foreign function call,
-  does not need to be stopped for the GC to run.
+  does not need to be stopped for the GC to run. [Work on this is ongoing](https://github.com/JuliaLang/julia/pull/49933)
 
-### Task preemption
+#### Task preemption
 Async in Julia is currently completely cooperative, meaning that the system relies on tasks voluntarily and frequently yielding to the scheduler.
 That requirement sets traps for casual users of async, who can too easily forget to check if their tasks actually do yield often enough. Tears ensue.
 
 Although there, to my knowledge, hasn't been any concrete initiatives, it's possible that Julia may introduce some limited preemption in the future, such that the scheduler may actively interrupt running tasks.
 The trick is how to devise a system where tasks may be interrupted while they are doing arbitrary computation, without interrupting them in the middle of some critical operation, thereby causing stack corruption or other awfulness.
 
-### Allow IO to run from other threads than thread 1
+#### Allow IO to run from other threads than thread 1
 Some scheduler operations, such as IO and `Timer` callbacks, can currently only run on thread 1.
 This limitation awkwardly breaks the abstraction that all tasks may run on any thread, such that the user does not need to think about scheduling.
 
@@ -1368,7 +1516,12 @@ If the unyielding task relies on an IO operation in order to complete, the syste
 
 Practically speaking, this situation can be avoided by following the maxim to _never write an unyielding task_, but it's still unfortunate that the consequences of failing to do so are unnecessarily dire.
 
-### Various optimisation
+#### Faster atomics
+As of Julia 1.11, some atomic operations are unnecessarily slow, although this is expected to be fixed soon. In particular:
+* Some uses of the `@atomic` macro, e.g. `@atomic x.x += 1` are not optimised properly by the Julia compiler. [There is recent work to fix this](https://github.com/JuliaLang/julia/pull/57010). Until the fix lands, the legacy type `Threads.Atomic` and its associated operations like `Threads.atomic_add!` can be used.
+* 128-bit aligned, monotonic atomic loads and stores on x86-64 machines are not optimised properly by Julia's backend compiler LLVM. This will likely get fixed in Julia 1.13.
+
+#### Various optimisation
 Many of the important moving parts have not been thoroughly optimised.
 In particular, the core devs have long talked about making the `Task` objects
 faster and more memory efficient to create.
@@ -1790,7 +1943,10 @@ version = "17.4.0+2"
 # ╟─513c6b05-23ed-4174-802a-2ade2acf2adc
 # ╠═cc56cdff-9d19-46c1-934c-f436439a2980
 # ╟─5c1ac369-15ee-4b36-a7bc-5ff1ba8cd8b1
-# ╟─a6172e40-8288-440f-b684-2268b218c3f3
+# ╟─7d45e1bb-3b06-46bd-8d38-bef078e9f48f
+# ╟─131aa45d-1f3a-4fee-bfa5-18b70440b658
+# ╟─2b7011ee-53f6-4afd-b999-f3fdc5a26df2
+# ╟─5338dab4-112b-4572-875b-73c33ef32113
 # ╟─a305ee04-498a-4933-a813-8550f50a761d
 # ╟─4a918040-1d9d-4c7d-967f-be5e3d91652f
 # ╟─00000000-0000-0000-0000-000000000001
