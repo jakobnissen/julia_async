@@ -27,7 +27,7 @@ When I read blogs or textbooks on programming, I'm struck by the diversity of va
 A lot of blogs describe their programming as revolving around websites and networks, where themes like communication protocols and JavaScript frameworks play major roles.
 In my eight years of scientific programming, I've never had to think about any of that stuff. To me, that's like a parallel universe of software which interacts very little with what I do, or care about, on my job.
 
-Most of the blogs I read mention asynchronous programming in this context of 'websites coding'. So, I thought that async was mostly about how your program handled waiting for network data.
+Most of the blogs I read mention asynchronous programming in this context of 'website programming'. So, I thought that async was mostly about how your program handled waiting for network data.
 An important subject, perhaps, but surely something I could ignore as a scientist.
 
 Oh boy, was that wrong.
@@ -79,8 +79,7 @@ fetch(task)
 # ╔═╡ a8acd763-7068-4a2c-9dd9-8f926680f8b7
 md"""
 The most common (but not _only_!) use case for tasks is to allow _parallel computation_, where multiple tasks are running at the same time.
-
-The difference between asynchronous and parallel programming is that parallel programming explicitly means that multiple tasks are running at once. Async programming is a broader term that includes parallel programming, but also includes situations where execution switches between tasks but only one runs at any given time.
+The difference between asynchronous and parallel programming is that parallel programming explicitly means that multiple tasks are running at any one instant. Async programming is a broader term that includes parallel programming, but also includes situations where execution switches between tasks but only one runs at any given time.
 
     >>>>>>>>>>>>>>>>>>>>>>> Time >>>>>>>>>>>>>>>>>
     Async but not parallel    
@@ -91,12 +90,12 @@ The difference between asynchronous and parallel programming is that parallel pr
       Task A ------------------------------------>
       Task B ------------------------------------>
 
-When tasks are started, they run on an underlying _thread_ provided by the operating system.
+When tasks run, they do so on an underlying _thread_ provided by the operating system (OS).
 The total number of threads currently needs to be set from command line when starting Julia using the command-line flag `--threads` (or `-t`, for short).
-It's the job of the operating system to distribute hardware resources (e.g. CPU time) among the threads.
+It's the job of the OS to distribute hardware resources (e.g. CPU time) among the threads.
 
-A CPU core can only run one thread at a time, so the number of threads is usually a small, fixed number corresponding to the core count of the CPU.
-You can check the number of current threads with the function `Threads.nthreads()`:
+A CPU core can only run one thread at a time, so the number of threads set by Julia is usually a small, fixed number corresponding to the core count of the CPU.
+You can check the number of threads running in the current Julia process with the function `Threads.nthreads()`:
 """
 
 # ╔═╡ de1f77c2-bdbb-4192-ba24-da41489c0a8b
@@ -105,7 +104,7 @@ Threads.nthreads()
 # ╔═╡ f74b1284-dece-4216-bb06-29514415ff5f
 md"""
 Julia intentionally provide few abstractions to interact with the threads themselves, focusing instead on _tasks_ as the central unit of asynchronous computing.
-As a programmer, your focus is supposed to be on managing the tasks, and you can usually simply rely on Julia to do a reasonable job of running the tasks on all available threads in an efficient manner.
+As a programmer, your focus is supposed to be on managing the tasks, and you can usually trust Julia to do a reasonable job of running the tasks on all available threads in an efficient manner.
 
 Precisely because the user is not supposed to think about threads, Julia has great freedom in which tasks are run on what threads.
 At least abstractly, a task may be run on any available thread, started and stopped arbitrarily, and even moved between threads.
@@ -143,7 +142,7 @@ Until then, I recommend you annotate the return value of `fetch` with the expect
 # ╔═╡ 20ee5cfa-b80c-4a2f-8314-67048c1c429b
 md"""
 ## The law of async
-Since async is all about splitting your program into stoppable and resumable tasks, converting synchronous code to asynchronous can be an invasive exercise, in that it may reorganize your entire program.
+Since async is all about splitting your program into stoppable and resumable tasks, converting synchronous code to asynchronous can invasive, in that it may reorganize the logical flow of your entire program.
 Async code is also (deservedly) infamous for being tricky to reason about and prone to bugs.
 To reduce the risk of bugs, it helps to internalize the cental law of async:
 
@@ -153,20 +152,19 @@ That is, if one task mutates some data, no other task must access that data (rea
 The reason is that most code relies on the assumption that data doesn't spontaneously change while it's being operated on.
 If task A mutates some data while task B operates on it, from the point of view of task B, the data _does_ appear to spontaneously mutate.
 
-In this spirit of legalism, let's write some sections of this law:
+In this spirit of legalism, let's write some sections of the central law:
 
-§ 1a. The different elements of an `Array` are considered different data.
-  That is, it's allowed for two tasks to mutate or operate on
-  different elements concurrently.
+§ 1a. The different elements of a Julia `Memory`, and therefore `Array`, are considered different data.
+  That is, it is allowed for two tasks to mutate
+  different elements of the same array concurrently.
 
-§ 1b. Some operations appear to only affect one element of an array, but
+§ 1b. Some operations superficially appear to only affect one element of an array, but
   actually affects all of them. E.g. `push!` might cause the whole array
   to be resized, which requires copying the memory of the whole array.
   Therefore, such an operation counts as mutating _every_ element.
-  Similarly, in Julia, the elements of `BitArray` are not independent:
+  Likewise, the elements of `BitArray` are not independent:
   Because multiple bits are stored in the same integer in an underlying `Array`        in the bitarray,
-  mutating one element of the array actually mutates the whole integer,
-  which affects multiple elements in the `BitArray`
+  mutating one element of the array mutates the whole integer underlying integer, and therefore mutates the data backing multiple elements in the `BitArray`.
 
 § 1c. If no task is mutating a piece of data, then it may be shared freely
   among tasks. For example, multiple tasks may look up in the same
@@ -241,12 +239,12 @@ Suppose now `ref` has a value of 5, and task A runs `add_ten_million` thus incre
 There is is some chance that it could be executed in the following order:
 
 1. Task A loads `ref[]` getting 5
-2. Task B computes `increment = ref[]`, getting 5
+2. Task B runs `increment = ref[]`, also getting 5
 3. Task A computes `5 + 1`, getting 6
 4. Task B subtracts 5 from `ref`, setting it to zero
 5. Task A sets `ref` to 6
 
-If that occurs, the subtraction done by task B will be cancelled when task A stores `6` back into ref, and therefore the 5 previous increments will be added twice to `result`.
+If that occurs, the subtraction done by task B will be undone when task A stores `6` back into ref, and therefore the 5 previous increments will be added twice to `result`.
 
 Here, the underlying cause is that `ref[] += 1` is composed of several steps, and that the other task is able to read or modify data while it is in the middle of this series of steps.
 
@@ -260,7 +258,7 @@ So naively, one would think that this single instruction would be atomic - not c
 
 In the CPU, even single CPU instructions may be executed in terms of smaller _micro-operations_, the details of which is an implementation detail of the CPU. Furthermore, the CPU's memory system is complex and multi-layered, and there is no guarantee that when a computer stores a value to memory, other parts of the CPU will immediately be able to see the stored value.
 
-Finally, on the programming language level, while Julia might implement the increment as a single instruction right now, Julia provides no guarantee that the compiler will generate the same assembly code in the future, making it pointless to write code based on the exact assembly instructions that are generated.
+Finally, on the programming language level, while Julia might compile the increment to a single instruction right now, there is no guarantee that the compiler will generate the same assembly code in the future, making it pointless to write code based on the exact assembly instructions that are generated.
 
 This will be a recurring theme in this notebook: The rules of async are abstractions that can't easily be explained in terms of the underlying implementation, because the implementations are complex and opaque.
 As a programmer, your best bet is to adhere to the abstraction and not try to outsmart it by peeking under the hood. 
@@ -269,17 +267,17 @@ Once we know that
 1. All CPU operations may be split into multiple steps in the CPU and the memory hierarchy, and
 2. Interacting with data that is in a partially processed state may cause a data race,
 
-we find ourselves forced to conclude that two different tasks can never interact with the same data at all, and so the prospect of writing asynchronous code appears completely hopeless.
+we find ourselves forced to conclude that no task can ever mutate data being shared by other tasks at all, and so the prospect of writing asynchronous code appears completely hopeless.
 
 ## Atomic operations
 Fortunately, Julia provides dedicated _atomic operations_ to address this problem. The compiler guarantees that these operations are always compiled down to dedicated atomic CPU instructions, which the CPU in turn guarantees are actually atomic.
 
-Let's try to solve the bug using atomic operations.
+Let's try to fix the bug using atomic operations.
 To use atomic operations in Julia, we need to use a mutable struct, with the relevant field marked `@atomic`:
 """
 
 # ╔═╡ a5fa1503-5880-4d0e-aba8-0c3ee34b6dfa
-mutable struct Atomic{T}
+mutable struct MyAtomic{T}
 	@atomic x::T
 end
 
@@ -310,7 +308,7 @@ end;
 
 # ╔═╡ 6a1c5924-92b6-40ef-967f-494332ade500
 let
-	atomic = Atomic{Int}(0)
+	atomic = MyAtomic{Int}(0)
 	t = @spawn increment_occasionally_atomic(atomic)
 	add_ten_million_atomic!(atomic)
 	fetch(t) + @atomic atomic.x
@@ -377,7 +375,7 @@ end;
 
 # ╔═╡ b74ae921-f376-4a40-b042-4e7a777902ef
 md"""
-Here, `observe_overwrite()` may return both `false` and `true`.
+Here, `observe_overwrite()` may return either `false` or `true`.
 
 That may surprise you. After all, we may naively reason that:
 * `b[] = a[]` is guaranteed to happen after `a[] = true`, since `b` depends on `a`, and `b[] = a[]` is placed after `a[] = true` in a function running in the same task.
@@ -430,7 +428,7 @@ end;
 # ╔═╡ a08bd0d6-776e-46a7-a186-614cc0bbd65d
 function observe_overwrite_atomic()
 	a = Ref(false)
-	b = AtomicBool(false)
+	b = MyAtomic(false)
 	t = @spawn overwrite(a, b)
 	(@atomic :sequentially_consistent b.x) ? a[] : true
 end;
@@ -479,7 +477,7 @@ end;
 
 # ╔═╡ 2a383feb-22d8-48d8-b247-c20ec5bbe91b
 md"""
-Here, in `mark_when_ready`, it's crucial that no operations are moved from in the before => after direction across the atomic modification of `is_ready`.
+Here, in `mark_when_ready`, it's crucial that no operations are moved in the before => after direction across the atomic modification of `is_ready`.
 For example, if `shared[] = 42` was moved to after the atomic operation, then the other task might use `shared` before it was ready.
 
 But the opposite isn't true! It would be no problem if the compiler moved some non-atomic operations in the after => before direction across the atomic operation.
@@ -505,8 +503,8 @@ Here, we use an extra atomic boolean `is_done` to signal to the consumer tasks t
 begin
 	function use_data_when_ready(
 		data::Ref{Int},
-		is_ready::Atomic{Bool},
-		is_done::Atomic{Bool},
+		is_ready::MyAtomic{Bool},
+		is_done::MyAtomic{Bool},
 	)
 		# Check atomically if data is ready to be processed
 		while !(@atomic :acquire is_ready.x)
@@ -524,8 +522,8 @@ begin
 
 	function run_example()
 		data = Ref(0)
-		is_ready = Atomic{Bool}(false)
-		is_done = Atomic{Bool}(false)
+		is_ready = MyAtomic{Bool}(false)
+		is_done = MyAtomic{Bool}(false)
 		# Spawn two tasks to process the data
 		tasks = map(1:2) do _
 			@spawn use_data_when_ready(data, is_ready, is_done)
@@ -547,8 +545,8 @@ The above example has a synchronization bug. Can you spot it?
 
 It is possible for the two consumer tasks to simultaneously read `is_ready` and break out of the while loop, before either of them is able to set `is_ready.x = false` to disable the other task. It's unlikely, but absolutely possible.
 
-The underlying problem is that, while both the read from, and the write to `is_ready` are individual atomic operations, that's not enough in this example.
-It will cause issues if task B reads reads `is_ready` in between task A reading and writing it. 
+The underlying problem is that, while both the reads from, and the writes to `is_ready` are individual atomic operations, that's not enough in this example.
+It will cause issues if task B reads `is_ready` in between task A reading from and writing to it. 
 What we need here is to do _both_ the reading and the writing as one single atomic operation.
 
 For this, we can use the `@atomicswap` macro. This sets a field and reads the old value in one atomic operation.
@@ -563,7 +561,7 @@ while !(@atomicswap :sequentially_consistent is_ready.x = false)
 end
 ```
 
-This will _guarantee_ that, if `is_ready` is only set to `true` once, then only one of the tasks will break out of the while loop.
+This will _guarantee_ that, if `is_ready` is only set to `true` once by the producer, then only one of the consumers will break out of the while loop.
 """
 
 # ╔═╡ 9d335a94-9b57-4624-a0f0-b54829a951e5
@@ -626,7 +624,6 @@ Therefore, even though this is an whole while loop, it acts atomically when view
 md"""
 ### Atomics are mostly used to implement other async abstractions
 Atomic operations provide the lowest level abstractions for async, being essentially async-friendly single CPU instructions.
-
 They aren't exactly user friendly though. Not only because of their low level, but also because their memory ordering and happens-before relationship is tricky to reason about.
 
 Direct use of atomics can also be extremely _inefficient_.
@@ -720,6 +717,48 @@ it pushes its callee-saved registers and the rip register to the stack.
 To resume control of a task, all it needs is a pointer to its stack, from which
 it will pop offs its register state and then resume execution by popping off the
 rip register with a `ret` instruction.
+
+I don't know how it's actually implemented in Julia, but an example implementation in x86 assembly could look like this:
+"""
+
+# ╔═╡ e06fcf86-8f30-4d9e-9f29-1a8705907999
+md"""
+```
+; Store on the stack the address of the code immediately
+; after this block, so that when execution returns from
+; this address, the task will continue after the yield
+push rip + <how many bytes this whole block is>
+
+; Save the state of the registers on the stack, except rsp
+push r15
+push r14
+push r13
+push r12
+push rbx
+push rbp
+
+; Store the stack pointer in the Task object itself, so when
+; this task is run again, the stack is in the right state
+mov [r11] rsp
+
+; Now switch the stack to whatever is stored in the rdi register,
+; where we point to the stack of the new task to execute
+mov rsp [rdi]
+
+; Restore the state of the CPU registers from this new stack
+pop rbp
+pop rbx
+pop r12
+pop r13
+pop r14
+pop r15
+
+; The return instruction pops into the rip register
+; and since the task pushed memory address after its own
+; yield, the new task will begin resuming from where it
+; yielded
+ret
+```
 """
 
 # ╔═╡ 725773df-24c7-4547-84fc-3cd163d19136
@@ -752,7 +791,36 @@ In Julia, all IO is non-blocking _from OS' point of view_, in the sense that the
 However, from the point of view of a _Julia task_, IO is always blocking, in the sense that the scheduler will make sure to not schedule the task that requested the resource until the resouce is ready.
 
 Therefore, in Julia lingo, when we talk about a blocking operation, we refer to an operation which yields control to the scheduler, and where the scheduler won't reschedule the task until the blocking operation is ready to proceeed.
-We will return to various blocking operations later in this notebook.
+We will return to various blocking operations later in this notebook, but let's see a simple example of the difference between blocking a whole thread on the OS level, and blocking a task on the Julia level while being non-blocking on the OS level:
+"""
+
+# ╔═╡ 4d700978-39e5-49c7-86ac-a3d0a7a724c1
+begin
+	# This call's libc's sleep, which blocks the whole OS thread
+	blocking_sleep(x::Int) = @ccall sleep((x % UInt)::UInt)::Nothing
+
+	function run_sleep_function(f)
+		tasks = map(_ -> @spawn(f(1)), 1:Threads.nthreads() * 2)
+		foreach(wait, tasks)
+	end
+end;
+
+# ╔═╡ 8d7d65f8-bb2c-4b9d-ba68-f9631af0fcb9
+# Block on the OS level
+@time run_sleep_function(blocking_sleep)
+
+# ╔═╡ a9c77789-b4d0-4e17-879b-5237b60cc5d6
+# Block on the Julia level, but be non-blocking on the OS level
+@time run_sleep_function(sleep)
+
+# ╔═╡ 959a52ff-b76a-4902-b822-2d63d0aa88bf
+md"""
+When `blocking_sleep` runs, it blocks the whole OS thread - that is, the OS does not allocate any resources to the thread. The Julia scheduler is not aware of how the OS allocates resources to threads, and so from the its perspective, the task appears to be normally running, except that it happens not to yield.
+Therefore, with N threads, the scheduler only runs N tasks in parallel.
+
+When Julia's own `sleep` function runs, the task is blocked, and thus control is immediately given back to the scheduler. The scheduler now has a thread free, and will start the next task on that thread (here, another sleeper).
+Within less than a millisecond after launching `run_sleep_function(sleep)`, the scheduler will have started all 2N sleeping tasks, possibly even from the same thread, such that their timers run in parallel.
+Note that the timer used by `sleep` does not need to occupy a thread to keep running, therefore neither of the 2N tasks will consume any significant amount of CPU time.
 """
 
 # ╔═╡ 766372a3-fb2c-4e86-8916-37bcaf9c0d79
@@ -770,7 +838,7 @@ Tasks which are managed by the language runtime's own scheduler, and which can b
 
 # ╔═╡ fc185cbe-37a2-45ba-bb5c-de3441722a70
 md"""
-### Cooperative multitasking and interrupts 
+### Cooperative multitasking
 We've seen how one task is able to yield control to the scheduler (or another task).
 A system of asynchronous programming that relies on tasks freely yielding control is called _cooperative multitasking_, as opposed to a system where the scheduler is able to stop other tasks, called _preemptive multitasking_.
 For now, as of Julia 1.12, Julia's system of async is entirely cooperative: Tasks must yield explicitly or implicitly, to be stopped.
@@ -785,7 +853,7 @@ fib(x) = x < 2 ? x : fib(x - 2) + fib(x - 1);
 # ╔═╡ 5e644139-6db6-49a9-ab68-7ad8c872d483
 # No allocations, no yielding. But if run with a larger number,
 # it can take a long, long time.
-@time fib(35)
+@time fib(37)
 
 # ╔═╡ 49629d75-2824-4938-999f-d02b65cc8c29
 md"""
@@ -825,6 +893,62 @@ That means your multi-threaded workload will inadvertently turn single-threaded,
 Because safepoints are inserted into all non-inline function calls, there are only two situations where this can be expected to occur:
 * If a task is stuck in a simple, tight loop
 * When a task executes non-Julia code, e.g. when calling a C library which naturally don't have safepoints for the Julia GC.
+
+We can demonstrate the consequences of heavy allocation in parallel tasks, with and without a badly behaving task that doesn't yield.
+"""
+
+# ╔═╡ 58203da0-c8ae-418c-a175-e1df5e3c6272
+# This function just allocates a lot
+function allocate_lots(N)
+	v = Any[]
+	for i in 1:N
+		push!(v, ["a"])
+	end
+	sum(i -> first(codeunits(first(i))), v; init=0)
+end;
+
+# ╔═╡ 888e0763-54ce-4324-a55f-5f012b39d1b9
+@time allocate_lots(2_000_000);
+
+# ╔═╡ 1ba3f7e7-62b0-4843-b060-5df890ebf15b
+function spawn_allocate(allow_safepoint::Bool)
+	f = allow_safepoint ? sleep : blocking_sleep
+	# 1 task with a task that either allows yielding (sleep)
+	# or doesn't (blocking_sleep)
+	tasks = [@spawn(f(1))]
+	# Saturate rest of the threads with tasks that allocate
+	for i in 1:Threads.nthreads() - 1
+		push!(tasks, @spawn(allocate_lots(2_000_000)))
+	end
+	foreach(wait, tasks)
+end;
+
+# ╔═╡ 1aa2b99b-8708-4a02-844a-02620562f1d4
+@time spawn_allocate(true)
+
+# ╔═╡ 4c749d70-e0aa-452c-b2a2-009b07fed30a
+@time spawn_allocate(false)
+
+# ╔═╡ fcaf0616-07ac-4458-b19a-2d1f452bbf36
+md"""
+Let's go through the example:
+
+The only interesting property of the `allocates_lots` function's is that it... allocates a lot. If call the number of available threads N, the `spawn_allocate` function spawns N - 1 tasks running `allocate_lots`, and then one task that sleeps.
+Its `allow_safepoint` argument determines if the sleep function it runs allows the GC to run concurrently: The built-in Julia `sleep` function blocks the task it's running on and therefore _does_ allow GC, whereas the libc sleep function directly puts the OS thread to sleep and will, from the viewpoint of the Julia scheduler, keep the task busy with no GC safepoints until it finishes.
+
+First, we time how long a single task completes `allocates_lots`. The timing will vary quite a bit depending on the run, the computer, and the version of Julia, so I'll just use the timings I got when I ran it while writing this: It took around 0.5 seconds.
+
+Then, we run `spawn_allocate(true)`. Since the sleep function here allows GC, this is equivalent to running N-1 instances of `allocate_lots` in parallel.
+Ideally, this would also take 0.5 seconds, as each task can run at the same time on a thread each.
+However, in reality, it took 1.2 seconds.
+That's because the runtime of `allocate_lots` is dominated by allocation and garbage collection, and N - 1 tasks can create way more garbage for the GC to handle than a single task.
+This demonstrates how memory allocations slow down multithreaded code more than single-threaded code.
+
+Finally, we also time what happens when the sleep function neither yields to the Julia scheduler, nor has a GC safepoint.
+Here, it took 2.1 seconds - almost a whole second longer than the previous multithreaded example.
+What happens here is that the N - 1 allocating tasks, quickly after starting, signal to the GC that it needs to run. The GC then pauses all running tasks at their next GC safepoint.
+However, the non-yielding sleep, running `libc`'s sleep, neither yields nor has safepoints, and so the GC needs to wait a whole second for the sleep to finish. Only then , and then can the GC run and restart the N - 1 waiting tasks.
+In effect, the non-safepoint sleep call completely disabled parallelism while it was running.
 """
 
 # ╔═╡ 545e5844-1624-4f5d-b0bc-fa900cd8562c
@@ -1024,7 +1148,7 @@ end;
 
 # ╔═╡ 96d968b3-4662-4985-9a81-7fe6cdcbb524
 let
-	is_ready = Atomic{Bool}(false)
+	is_ready = MyAtomic{Bool}(false)
 	shared = Ref(0)
 	t = @spawn return_when_ready(is_ready, shared)
 	sleep(0.1)
@@ -1906,13 +2030,24 @@ version = "17.4.0+2"
 # ╟─69b86287-ad33-486a-9b70-b4eacb443f43
 # ╟─1d70bc25-b941-4481-8579-80b70e7b6846
 # ╟─6b900c42-127e-463f-b941-c321297537f3
+# ╟─e06fcf86-8f30-4d9e-9f29-1a8705907999
 # ╟─725773df-24c7-4547-84fc-3cd163d19136
+# ╠═4d700978-39e5-49c7-86ac-a3d0a7a724c1
+# ╠═8d7d65f8-bb2c-4b9d-ba68-f9631af0fcb9
+# ╠═a9c77789-b4d0-4e17-879b-5237b60cc5d6
+# ╟─959a52ff-b76a-4902-b822-2d63d0aa88bf
 # ╟─766372a3-fb2c-4e86-8916-37bcaf9c0d79
 # ╟─fc185cbe-37a2-45ba-bb5c-de3441722a70
 # ╠═87a0896d-38a8-4b44-84b9-8d35a284338d
 # ╠═5e644139-6db6-49a9-ab68-7ad8c872d483
 # ╟─49629d75-2824-4938-999f-d02b65cc8c29
 # ╟─5688d79a-0593-4722-b4f6-252b327746b2
+# ╠═58203da0-c8ae-418c-a175-e1df5e3c6272
+# ╠═888e0763-54ce-4324-a55f-5f012b39d1b9
+# ╠═1ba3f7e7-62b0-4843-b060-5df890ebf15b
+# ╠═1aa2b99b-8708-4a02-844a-02620562f1d4
+# ╠═4c749d70-e0aa-452c-b2a2-009b07fed30a
+# ╟─fcaf0616-07ac-4458-b19a-2d1f452bbf36
 # ╟─545e5844-1624-4f5d-b0bc-fa900cd8562c
 # ╠═9a6d75a0-0f0c-4909-886d-9a2377ef0ee7
 # ╠═05524538-352d-4dff-9f24-5844b46635c8
